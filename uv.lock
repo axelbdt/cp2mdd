@@ -1,0 +1,47 @@
+version = 1
+revision = 3
+requires-python = ">=3.14"
+
+[[package]]
+name = "cp2bdd"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "oxidd" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "oxidd", specifier = ">=0.11.1" }]
+
+[[package]]
+name = "oxidd"
+version = "0.11.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3d/61/f828510414aadbcfc2835032cef97d0805668cd3c035fa2b7ff8106483b4/oxidd-0.11.1.tar.gz", hash = "sha256:122c3f4b1d1dd2886a773b9fc86856f5f5a09c558af20c7b541f694df403ba0a", size = 299928, upload-time = "2025-10-01T21:39:07.829Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/17/9c/f71f2d20a84ec73d254c677112cbfdb6669182ae9adb0930c09804f49e75/oxidd-0.11.1-cp39-abi3-macosx_10_12_x86_64.whl", hash = "sha256:f3b8cbab7596004dfd9e120768da17adb07eabe54263f8f20acef09661ba4eee", size = 633147, upload-time = "2025-10-01T21:38:13.782Z" },
+    { url = "https://files.pythonhosted.org/packages/b8/c6/60c486a41975bb119039967f21046ab1a5a008992f1de00d1db0a729e40d/oxidd-0.11.1-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:1318fbe67a94fc3a5f31393d4ccb9d5d6d4c6687fe9a7dec09ff32bd45280594", size = 583347, upload-time = "2025-10-01T21:38:14.987Z" },
+    { url = "https://files.pythonhosted.org/packages/57/ae/4ecb9cc97da2edc27d10d09b8c86cf837d881823834bdd137f1d4f697f90/oxidd-0.11.1-cp39-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:e5c32fd7ad7bc8e52693d5cea612c3df5a2360b7c368e49422d3d8ea9bb4703a", size = 578333, upload-time = "2025-10-01T21:38:16.119Z" },
+    { url = "https://files.pythonhosted.org/packages/40/1b/dfdef1464fecb895ff8bf5fa291ff5d80fadf4b2ef63832362794a2e997b/oxidd-0.11.1-cp39-abi3-manylinux_2_17_armv7l.manylinux2014_armv7l.whl", hash = "sha256:08579431b7216f4e9f8ac301ee7740d4b4c14760332cc96c5ac88307cef0033f", size = 601429, upload-time = "2025-10-01T21:38:17.269Z" },
+    { url = "https://files.pythonhosted.org/packages/6b/e1/4ff06a072a84f71e47af707a515c9652d63254bb62521f4c4ccfe43a5ac8/oxidd-0.11.1-cp39-abi3-manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:f755d740e94635df4f6fe225914050541cfe40f77556b2f5fb14e786c568eb78", size = 680575, upload-time = "2025-10-01T21:38:18.748Z" },
+    { url = "https://files.pythonhosted.org/packages/36/8d/4b7083d6897cb3b728c7de96910d79946d50090b544027f9e3d80de9a4a4/oxidd-0.11.1-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:ecdb53858115d4fd6a731162060d0ca76dc8e84214f012973aca254e93457d00", size = 618193, upload-time = "2025-10-01T21:38:19.972Z" },
+    { url = "https://files.pythonhosted.org/packages/7b/f3/ca37e22dced28819ab48a9cf5dd62ca1e39ca48d80480a38d167dfea6c92/oxidd-0.11.1-cp39-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:b92f214bc72f7a7ed68830a9c4ff989cedcd0b79487df440c7ad9e8207234621", size = 576670, upload-time = "2025-10-01T21:38:21.072Z" },
+    { url = "https://files.pythonhosted.org/packages/0c/c0/57ce72dd0ef11eb781da5d2dd51b489b67a9bd2664064cfd1fc340fa90a8/oxidd-0.11.1-cp39-abi3-musllinux_1_2_armv7l.whl", hash = "sha256:b8f8d0c18c644dbff733c54f73981f0a0096ce416ce28a4e62e3fe593586f6ed", size = 600042, upload-time = "2025-10-01T21:38:22.291Z" },
+    { url = "https://files.pythonhosted.org/packages/2d/3e/86656c115d07cfdf28f3d6fb2e6f21967ee6c16a3e675448752a3789f674/oxidd-0.11.1-cp39-abi3-musllinux_1_2_i686.whl", hash = "sha256:d2865281933407820b21d80769ecbf7b8c52d27193284e8b1254ed611dc943df", size = 645142, upload-time = "2025-10-01T21:38:23.88Z" },
+    { url = "https://files.pythonhosted.org/packages/b9/5c/22870945b099fbd50b13462da14f0ddd99c2863e4d9be52ba250c0e4121f/oxidd-0.11.1-cp39-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:c147a615cfd6c6224963e2ea613c90391afb4b8e9e74e925c2d8064060d114dc", size = 615755, upload-time = "2025-10-01T21:38:25.145Z" },
+    { url = "https://files.pythonhosted.org/packages/c9/ba/04b8d9e28c50fb4581d857b28d217c4763c594514adc8fc8347cdef8b596/oxidd-0.11.1-cp39-abi3-win32.whl", hash = "sha256:8d62ecc974d662fa093e38bd917cc1774b406b31dd460bbba5e5fdddec3153f6", size = 480905, upload-time = "2025-10-01T21:38:26.325Z" },
+    { url = "https://files.pythonhosted.org/packages/b0/2c/8dc0c2a7e902329064ad2e8c0d3712a8fb02c34584b1a6fd6b2a9c575496/oxidd-0.11.1-cp39-abi3-win_amd64.whl", hash = "sha256:242711287c2c6baa274991db27a9ba97471c451ca2ae7a603fa177a16c6fe163", size = 480863, upload-time = "2025-10-01T21:38:27.824Z" },
+    { url = "https://files.pythonhosted.org/packages/6a/0e/b67b1a15eafcbbc5943bd20e8c9148e83d8b134a5a45b1885b5ccf3992c8/oxidd-0.11.1-cp39-abi3-win_arm64.whl", hash = "sha256:47b242499201d66e3d191ef434d0ec6cec25dc815d32e526726fd4f60a7f3a39", size = 451604, upload-time = "2025-10-01T21:38:29.288Z" },
+]
+
+[[package]]
+name = "typing-extensions"
+version = "4.15.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/72/94/1a15dd82efb362ac84269196e94cf00f187f7ed21c242792a923cdb1c61f/typing_extensions-4.15.0.tar.gz", hash = "sha256:0cea48d173cc12fa28ecabc3b837ea3cf6f38c6d1136f85cbaaf598984861466", size = 109391, upload-time = "2025-08-25T13:49:26.313Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/18/67/36e9267722cc04a6b9f15c7f3441c2363321a3ea07da7ae0c0707beb2a9c/typing_extensions-4.15.0-py3-none-any.whl", hash = "sha256:f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548", size = 44614, upload-time = "2025-08-25T13:49:24.86Z" },
+]

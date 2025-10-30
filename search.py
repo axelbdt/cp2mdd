@@ -95,6 +95,17 @@ class SearchTree:
         """
         return extract_paths(self.root, positive_only=True)
     
+    def extract_minimal_unsat_paths(self) -> List[List[Tuple[str, str, Any]]]:
+        """Extract minimal UNSAT paths (stop at first UNSAT node).
+        
+        Returns paths to nodes marked UNSAT without including their children.
+        Only includes positive (=) decisions.
+        
+        Returns:
+            List of minimal UNSAT decision sequences
+        """
+        return _extract_minimal_unsat_recursive(self.root, [])
+    
     def validate(self) -> None:
         """Validate all paths satisfy one-hot constraint.
         
@@ -107,6 +118,46 @@ class SearchTree:
     def __str__(self) -> str:
         """Pretty print entire tree."""
         return str(self.root)
+
+
+def _extract_minimal_unsat_recursive(
+    node: Node,
+    path_so_far: List[Tuple[str, str, Any]]
+) -> List[List[Tuple[str, str, Any]]]:
+    """Recursively extract minimal UNSAT paths.
+    
+    Args:
+        node: Current node in traversal
+        path_so_far: Accumulated positive decisions from root
+        
+    Returns:
+        List of minimal UNSAT paths
+    """
+    # Add current positive decision to path
+    if node.decision is not None:
+        var, op, val = node.decision
+        if op == '=':
+            path = path_so_far + [(var, op, val)]
+        else:
+            # Skip negative decisions
+            path = path_so_far
+    else:
+        path = path_so_far
+    
+    # Found UNSAT node: return this path and stop
+    if node.label == 'UNSAT':
+        return [path]
+    
+    # SAT node: don't include in UNSAT paths
+    if node.label == 'SAT':
+        return []
+    
+    # Internal node: recurse on children
+    unsat_paths = []
+    for child in node.children:
+        unsat_paths.extend(_extract_minimal_unsat_recursive(child, path))
+    
+    return unsat_paths
 
 
 def parse_log_to_decisions(log_text: str) -> List[Tuple[Tuple[str, str, Any], Optional[str]]]:
@@ -378,6 +429,16 @@ SAT
         for i, (path, label) in enumerate(tree.extract_positive_only_paths(), 1):
             path_str = " → ".join(f"{v}={val}" for v, op, val in path)
             print(f"Path {i}: {path_str} [{label}]")
+        
+        print("\nMinimal UNSAT paths:")
+        print("-" * 60)
+        minimal_unsat = tree.extract_minimal_unsat_paths()
+        if minimal_unsat:
+            for i, path in enumerate(minimal_unsat, 1):
+                path_str = " ∧ ".join(f"{v}={val}" for v, op, val in path)
+                print(f"UNSAT {i}: {path_str}")
+        else:
+            print("No minimal UNSAT paths found")
         
         print("\nSAT paths (for BDD encoding):")
         print("-" * 60)
