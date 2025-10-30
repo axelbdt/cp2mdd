@@ -70,50 +70,6 @@ class SearchTree:
         root = build_tree_from_decisions(decisions)
         return cls(root)
     
-    def extract_all_paths(self) -> List[Tuple[List[Tuple[str, str, Any]], str]]:
-        """Extract all paths from root to leaves with labels.
-        
-        Returns:
-            List of (decision_sequence, label) pairs
-        """
-        return extract_paths(self.root, positive_only=False)
-    
-    def extract_sat_paths(self) -> List[List[Tuple[str, str, Any]]]:
-        """Extract only paths leading to SAT leaves, positive decisions only.
-        
-        Returns:
-            List of decision sequences (variable, operator, value)
-        """
-        all_paths = extract_paths(self.root, positive_only=True)
-        return [path for path, label in all_paths if label == 'SAT']
-    
-    def extract_positive_only_paths(self) -> List[Tuple[List[Tuple[str, str, Any]], str]]:
-        """Extract all paths with only positive decisions.
-        
-        Returns:
-            List of (decision_sequence, label) pairs
-        """
-        return extract_paths(self.root, positive_only=True)
-    
-    def extract_minimal_unsat_paths(self) -> List[List[Tuple[str, str, Any]]]:
-        """Extract minimal UNSAT paths (stop at first UNSAT node).
-        
-        Returns paths to nodes marked UNSAT without including their children.
-        Only includes positive (=) decisions.
-        
-        Returns:
-            List of minimal UNSAT decision sequences
-        """
-        return _extract_minimal_unsat_recursive(self.root, [])
-    
-    def validate(self) -> None:
-        """Validate all paths satisfy one-hot constraint.
-        
-        Raises:
-            ValueError: If any path violates one-hot constraint
-        """
-        for path, label in self.extract_positive_only_paths():
-            validate_path(path)
     
     def __str__(self) -> str:
         """Pretty print entire tree."""
@@ -417,49 +373,8 @@ SAT
         
         print("\nTree structure:")
         print(tree)
-        
-        print("\nAll paths (with negations):")
-        print("-" * 60)
-        for i, (path, label) in enumerate(tree.extract_all_paths(), 1):
-            path_str = " → ".join(f"{v}{op}{val}" for v, op, val in path)
-            print(f"Path {i}: {path_str} [{label}]")
-        
-        print("\nPositive-only paths:")
-        print("-" * 60)
-        for i, (path, label) in enumerate(tree.extract_positive_only_paths(), 1):
-            path_str = " → ".join(f"{v}={val}" for v, op, val in path)
-            print(f"Path {i}: {path_str} [{label}]")
-        
-        print("\nMinimal UNSAT paths:")
-        print("-" * 60)
-        minimal_unsat = tree.extract_minimal_unsat_paths()
-        if minimal_unsat:
-            for i, path in enumerate(minimal_unsat, 1):
-                path_str = " ∧ ".join(f"{v}={val}" for v, op, val in path)
-                print(f"UNSAT {i}: {path_str}")
-        else:
-            print("No minimal UNSAT paths found")
-        
-        print("\nSAT paths (for BDD encoding):")
-        print("-" * 60)
-        sat_paths = tree.extract_sat_paths()
-        if sat_paths:
-            for i, path in enumerate(sat_paths, 1):
-                path_str = " ∧ ".join(f"{v}={val}" for v, op, val in path)
-                print(f"Solution {i}: {path_str}")
-        else:
-            print("No SAT paths found")
-        
-        print("\nValidating paths...")
-        tree.validate()
-        print("✓ All paths satisfy one-hot constraint")
-        
     except ValueError as e:
-        print(f"Error: {e}")
-        return 1
-    
-    return 0
+        print(f"Error parsing trace: {e}")
 
-
-if __name__ == '__main__':
-    exit(main())
+if __name__ == "__main__":
+    main()
