@@ -51,8 +51,8 @@ CREATE TABLE subtrees (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     instance_id INTEGER NOT NULL,
     partial_assignment TEXT NOT NULL,
-    lowest_sat_bound INTEGER,
-    highest_unsat_bound INTEGER,
+    best_sat_bound INTEGER,
+    worst_unsat_bound INTEGER,
     last_tested_at TIMESTAMP,
     FOREIGN KEY (instance_id) REFERENCES instances(id),
     UNIQUE (instance_id, partial_assignment)
