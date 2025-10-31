@@ -1,4 +1,3 @@
-
 -- experiments.db schema
 -- SQLite database for CPBP algorithm evaluation experiments
 
@@ -8,9 +7,11 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE instances (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     filename TEXT NOT NULL,
-    problem_type STRING NOT NULL,
-    highest_unsat INTEGER,  -- highest objective found across all resolutions, computed during log processing
-    lowest_sat INTEGER,   -- lowest objective found across all resolutions, computed during log processing
+    problem_type TEXT NOT NULL,
+    best_bound INTEGER NOT NULL,
+    optimization_type TEXT NOT NULL,
+    highest_unsat INTEGER,
+    lowest_sat INTEGER,
     UNIQUE (filename, problem_type)
 );
 
@@ -18,14 +19,45 @@ CREATE TABLE instances (
 CREATE TABLE batches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
-    script_path TEXT,  -- path to generated .sh file
+    batch_type TEXT NOT NULL,
+    script_path TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    submitted_at TIMESTAMP,  -- when successfully submitted to SLURM
+    submitted_at TIMESTAMP,
     submission_attempts INTEGER DEFAULT 0,
-    last_error TEXT,  -- last error message
-    slurm_job_id TEXT,  -- SLURM job ID if submitted
+    last_error TEXT,
+    slurm_job_id TEXT,
     logs_processed BOOLEAN DEFAULT 0
 );
 
--- TODO: Create table for partial assignment subtrees, did we test them ? Are they sat, unsat ?
+-- Resolutions table: individual solver runs
+CREATE TABLE resolutions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL,
+    instance_id INTEGER NOT NULL,
+    gap REAL NOT NULL,
+    objective_bound INTEGER NOT NULL,
+    partial_assignment TEXT,
+    log_path TEXT NOT NULL,
+    started_at TIMESTAMP,
+    completed_at TIMESTAMP,
+    timeout BOOLEAN DEFAULT 0,
+    result TEXT,
+    FOREIGN KEY (batch_id) REFERENCES batches(id),
+    FOREIGN KEY (instance_id) REFERENCES instances(id)
+);
 
+-- Subtrees table: partial assignment results across resolutions
+CREATE TABLE subtrees (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance_id INTEGER NOT NULL,
+    partial_assignment TEXT NOT NULL,
+    lowest_sat_bound INTEGER,
+    highest_unsat_bound INTEGER,
+    last_tested_at TIMESTAMP,
+    FOREIGN KEY (instance_id) REFERENCES instances(id),
+    UNIQUE (instance_id, partial_assignment)
+);
+
+CREATE INDEX idx_resolutions_batch ON resolutions(batch_id);
+CREATE INDEX idx_resolutions_instance ON resolutions(instance_id);
+CREATE INDEX idx_subtrees_instance ON subtrees(instance_id);

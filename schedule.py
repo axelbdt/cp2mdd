@@ -5,6 +5,7 @@ Manages root resolutions, subtree testing, and result tracking.
 """
 
 import argparse
+import json
 import re
 import sqlite3
 import subprocess
@@ -33,65 +34,15 @@ def db_connection(db_path: str = "experiments.db"):
         conn.close()
 
 
-def init_database(db_path: str = "experiments.db"):
+def init_database(db_path: str = "experiments.db", schema_file: str = "create_db.sql"):
     """Initialize database schema."""
-    schema = """
-    PRAGMA foreign_keys = ON;
-
-    CREATE TABLE IF NOT EXISTS instances (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        filename TEXT NOT NULL,
-        problem_type TEXT NOT NULL,
-        optimal_score INTEGER,  -- NULL until populated
-        highest_unsat INTEGER,
-        lowest_sat INTEGER,
-        UNIQUE (filename, problem_type)
-    );
-
-    CREATE TABLE IF NOT EXISTS batches (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL UNIQUE,
-        batch_type TEXT NOT NULL,  -- 'root' or 'subtree'
-        script_path TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        submitted_at TIMESTAMP,
-        submission_attempts INTEGER DEFAULT 0,
-        last_error TEXT,
-        slurm_job_id TEXT,
-        logs_processed BOOLEAN DEFAULT 0
-    );
-
-    CREATE TABLE IF NOT EXISTS resolutions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        batch_id INTEGER NOT NULL,
-        instance_id INTEGER NOT NULL,
-        gap REAL NOT NULL,
-        objective_bound INTEGER NOT NULL,
-        partial_assignment TEXT,  -- NULL for root, comma-separated for subtrees
-        log_path TEXT NOT NULL,
-        started_at TIMESTAMP,
-        completed_at TIMESTAMP,
-        timeout BOOLEAN DEFAULT 0,
-        result TEXT,  -- 'SAT', 'UNSAT', 'TIMEOUT', 'ERROR', NULL
-        FOREIGN KEY (batch_id) REFERENCES batches(id),
-        FOREIGN KEY (instance_id) REFERENCES instances(id)
-    );
-
-    CREATE TABLE IF NOT EXISTS subtrees (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        instance_id INTEGER NOT NULL,
-        partial_assignment TEXT NOT NULL,  -- normalized: alphabetically sorted
-        lowest_sat_bound INTEGER,
-        highest_unsat_bound INTEGER,
-        last_tested_at TIMESTAMP,
-        FOREIGN KEY (instance_id) REFERENCES instances(id),
-        UNIQUE (instance_id, partial_assignment)
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_resolutions_batch ON resolutions(batch_id);
-    CREATE INDEX IF NOT EXISTS idx_resolutions_instance ON resolutions(instance_id);
-    CREATE INDEX IF NOT EXISTS idx_subtrees_instance ON subtrees(instance_id);
-    """
+    schema_path = Path(schema_file)
+    
+    if not schema_path.exists():
+        print(f"Error: Schema file not found: {schema_file}")
+        return
+    
+    schema = schema_path.read_text()
     
     with db_connection(db_path) as conn:
         conn.executescript(schema)
@@ -99,49 +50,68 @@ def init_database(db_path: str = "experiments.db"):
     print(f"Database initialized: {db_path}")
 
 
-def scan_instances(data_dir: str, db_path: str = "experiments.db"):
-    """Scan directory structure and populate instances table."""
-    data_path = Path(data_dir)
+def scan_instances(json_file: str, db_path: str = "experiments.db"):
+    """Import instances from xcsp_solved.json."""
     
-    if not data_path.exists():
-        print(f"Error: Data directory not found: {data_dir}")
+    json_path = Path(json_file)
+    if not json_path.exists():
+        print(f"Error: JSON file not found: {json_file}")
+        return
+    
+    with open(json_path, 'r') as f:
+        data = json.load(f)
+    
+    if not isinstance(data, list):
+        print("Error: Expected JSON array of instances")
         return
     
     instances = []
-    
-    # Recursively find all .xml files (XCSP format)
-    for xml_file in data_path.rglob("*.xml"):
-        # Extract problem type from directory structure
-        # Assumes structure like: data/{problem_type}/instance.xml
-        relative = xml_file.relative_to(data_path)
-        problem_type = relative.parts[0] if len(relative.parts) > 1 else "unknown"
+    for item in data:
+        name = item['name']
+        family = item['family']
+        best_bound = item['best_bound']
+        type_str = item['type']
         
-        instances.append((str(relative), problem_type))
+        # Parse optimization type
+        if type_str.startswith('max'):
+            optimization_type = 'max'
+        elif type_str.startswith('min'):
+            optimization_type = 'min'
+        else:
+            print(f"Warning: Unknown type '{type_str}' for {name}, skipping")
+            continue
+        
+        # Construct filename
+        filename = f"cop/{name}_c25.xml.lzma"
+        
+        instances.append((filename, family, best_bound, optimization_type))
     
     if not instances:
-        print(f"No XCSP files found in {data_dir}")
+        print("No valid instances found in JSON")
         return
     
     with db_connection(db_path) as conn:
         cursor = conn.cursor()
         
         inserted = 0
-        for filename, problem_type in instances:
+        for filename, problem_type, best_bound, optimization_type in instances:
             try:
                 cursor.execute(
                     """
-                    INSERT INTO instances (filename, problem_type)
-                    VALUES (?, ?)
-                    ON CONFLICT(filename, problem_type) DO NOTHING
+                    INSERT INTO instances (filename, problem_type, best_bound, optimization_type)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(filename, problem_type) DO UPDATE SET
+                        best_bound = excluded.best_bound,
+                        optimization_type = excluded.optimization_type
                     """,
-                    (filename, problem_type)
+                    (filename, problem_type, best_bound, optimization_type)
                 )
                 if cursor.rowcount > 0:
                     inserted += 1
-            except sqlite3.IntegrityError:
-                pass
+            except sqlite3.IntegrityError as e:
+                print(f"Error inserting {filename}: {e}")
         
-        print(f"Scanned {len(instances)} files, inserted {inserted} new instances")
+        print(f"Processed {len(instances)} instances, inserted/updated {inserted}")
 
 
 def normalize_partial_assignment(assignment: str) -> str:
@@ -168,12 +138,12 @@ def format_partial_assignment_for_solver(assignment: str) -> str:
     return f'--assignment "{assignment}"'
 
 
-def calculate_objective_bound(optimal_score: int, gap: float) -> int:
+def calculate_objective_bound(best_bound: int, gap: float) -> int:
     """Calculate objective bound based on gap percentage."""
-    if optimal_score >= 0:
-        bound = optimal_score * (1 + gap)
+    if best_bound >= 0:
+        bound = best_bound * (1 + gap)
     else:
-        bound = optimal_score * (1 - gap)
+        bound = best_bound * (1 - gap)
     
     return int(bound)
 
@@ -224,11 +194,10 @@ def create_root_batch(
     with db_connection(db_path) as conn:
         cursor = conn.cursor()
         
-        # Get instances with optimal scores
+        # Get instances with best bounds
         query = """
-            SELECT id, filename, problem_type, optimal_score
+            SELECT id, filename, problem_type, best_bound, optimization_type
             FROM instances
-            WHERE optimal_score IS NOT NULL
         """
         if instance_limit:
             query += f" LIMIT {instance_limit}"
@@ -237,20 +206,20 @@ def create_root_batch(
         instances = cursor.fetchall()
         
         if not instances:
-            print("No instances with optimal scores found")
-            print("Run: schedule.py import-optimal-scores <csv_file>")
+            print("No instances found")
+            print("Run: schedule.py scan-instances xcsp_solved.json")
             return
         
-        print(f"Found {len(instances)} instances with optimal scores")
+        print(f"Found {len(instances)} instances")
         print(f"Testing {len(gaps)} gap values: {gaps}")
         print(f"Total resolutions: {len(instances) * len(gaps)}")
         
         if dry_run:
             print("\nDRY RUN - Sample resolutions:")
-            for i, (inst_id, filename, problem_type, optimal) in enumerate(instances[:3]):
+            for i, (inst_id, filename, problem_type, best_bound, opt_type) in enumerate(instances[:3]):
                 for gap in gaps[:3]:
-                    bound = calculate_objective_bound(optimal, gap)
-                    print(f"  {filename} @ gap={gap}: bound={bound}")
+                    bound = calculate_objective_bound(best_bound, gap)
+                    print(f"  {filename} @ gap={gap}: bound={bound} ({opt_type})")
             return
         
         # Create batch
@@ -265,9 +234,9 @@ def create_root_batch(
         
         # Create resolutions
         resolution_count = 0
-        for inst_id, filename, problem_type, optimal_score in instances:
+        for inst_id, filename, problem_type, best_bound, opt_type in instances:
             for gap in gaps:
-                bound = calculate_objective_bound(optimal_score, gap)
+                bound = calculate_objective_bound(best_bound, gap)
                 log_path = f"logs/{batch_name}/{batch_name}_{resolution_count}.log"
                 
                 cursor.execute(
@@ -490,7 +459,7 @@ def process_logs(batch_id: int, db_path: str = "experiments.db"):
     
     # Import here to use the existing search.py parser
     try:
-        from search import SearchTree
+        from search import SearchTree, extract_paths
     except ImportError:
         print("Error: search.py not found in current directory")
         print("Ensure search.py is available for parsing search traces")
@@ -563,7 +532,7 @@ def process_logs(batch_id: int, db_path: str = "experiments.db"):
                 tree = SearchTree.from_log(log_text)
                 
                 # Extract all paths with positive decisions only
-                for path, label in tree.extract_positive_only_paths():
+                for path, label in extract_paths(tree.root, positive_only=True):
                     if not path:  # Skip empty paths
                         continue
                     
@@ -656,47 +625,6 @@ def list_batches(db_path: str = "experiments.db"):
             print(f"{batch_id:<5} {name:<25} {btype:<8} {script_check:<7} {submit_check:<7} {logs_check:<7} {job_display}")
 
 
-def import_optimal_scores(csv_file: str, db_path: str = "experiments.db"):
-    """Import optimal scores from CSV file.
-    
-    Expected CSV format:
-    filename,optimal_score
-    problem1.xml,42
-    problem2.xml,137
-    """
-    import csv
-    
-    csv_path = Path(csv_file)
-    if not csv_path.exists():
-        print(f"CSV file not found: {csv_file}")
-        return
-    
-    with db_connection(db_path) as conn:
-        cursor = conn.cursor()
-        
-        with open(csv_path, 'r') as f:
-            reader = csv.DictReader(f)
-            
-            updated = 0
-            for row in reader:
-                filename = row['filename']
-                optimal_score = int(row['optimal_score'])
-                
-                cursor.execute(
-                    """
-                    UPDATE instances
-                    SET optimal_score = ?
-                    WHERE filename = ?
-                    """,
-                    (optimal_score, filename)
-                )
-                
-                if cursor.rowcount > 0:
-                    updated += 1
-        
-        print(f"Updated {updated} instances with optimal scores")
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="XCSP Optimization Gap Testing Framework"
@@ -708,12 +636,8 @@ def main():
     subparsers.add_parser("init-db", help="Initialize database schema")
     
     # scan-instances
-    scan_parser = subparsers.add_parser("scan-instances", help="Scan data directory for instances")
-    scan_parser.add_argument("data_dir", help="Root data directory")
-    
-    # import-optimal-scores
-    import_parser = subparsers.add_parser("import-optimal-scores", help="Import optimal scores from CSV")
-    import_parser.add_argument("csv_file", help="CSV file with filename,optimal_score")
+    scan_parser = subparsers.add_parser("scan-instances", help="Import instances from xcsp_solved.json")
+    scan_parser.add_argument("json_file", help="Path to xcsp_solved.json")
     
     # create-root-batch
     root_parser = subparsers.add_parser("create-root-batch", help="Create root resolution batch")
@@ -747,10 +671,7 @@ def main():
         init_database()
     
     elif args.command == "scan-instances":
-        scan_instances(args.data_dir)
-    
-    elif args.command == "import-optimal-scores":
-        import_optimal_scores(args.csv_file)
+        scan_instances(args.json_file)
     
     elif args.command == "create-root-batch":
         create_root_batch(instance_limit=args.limit, dry_run=args.dry_run)
