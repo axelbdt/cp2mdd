@@ -8,8 +8,7 @@ CREATE TABLE instances (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     filename TEXT NOT NULL,
     problem_type TEXT NOT NULL,
-    best_bound INTEGER NOT NULL,
-    optimization_type TEXT NOT NULL,
+    optimal INTEGER NOT NULL,
     highest_unsat INTEGER,
     lowest_sat INTEGER,
     UNIQUE (filename, problem_type)
@@ -51,8 +50,8 @@ CREATE TABLE subtrees (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     instance_id INTEGER NOT NULL,
     partial_assignment TEXT NOT NULL,
-    best_sat_bound INTEGER,
-    worst_unsat_bound INTEGER,
+    lowest_sat INTEGER,
+    highest_unsat INTEGER,
     last_tested_at TIMESTAMP,
     FOREIGN KEY (instance_id) REFERENCES instances(id),
     UNIQUE (instance_id, partial_assignment)
