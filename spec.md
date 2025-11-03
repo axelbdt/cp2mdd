@@ -1,148 +1,199 @@
-Here are my requirements:
+# Final Specification
 
-I have a set of instances from the XCSP corpus
+## Overview
 
-We assume all optimization problems are minimization
+System for evaluating CSP solver behavior across optimality gaps by:
+1. Solving instances at various gaps, capturing search traces
+2. Building search trees from traces (explored paths only)
+3. Verifying unexplored branches (negations) to label all nodes
+4. Analyzing complete trees for algorithm evaluation
 
-For ecach instanc :
-  - I have the optimal score somewhere
-  - For each value in a set of optimality gap values
-    - I set the optimality gap value as a bound on the objective variable
-    - I solve as a satisfaction problem, for one single solution
-    - I construct the search tree from the search trace produced by the solver
-    - Foer each node in the seach tree
-      - I consider the decision that was made x = v and the decision that was not make x != v
-      - I need to know if the corresponding subtree is SAT or UNSAT
-        - I know about x=v branch from the search trace
-        - For the x!=v branch, I run a solver to see if it is SAT or UNSAT : I define a problem from original instance and partial assignment from search and I solve in a separate process
+## Data Model
 
-Each time I solve a problem, or a subproblem I do it in a separate process
+### Instance
+- XCSP optimization problem (minimization only)
+- Known optimal solution value
+- Stored in `xcsp_solved.json`, imported to sqlite
 
-Subtree is SAT if it contains a solution of the CSP
-Subtree is UNSAT if it contains no solution of the CSP even after exhaustive search
+### Resolution
+- Single solver run: (instance, optimality_gap)
+- Produces search trace with explored path
+- Generates search tree pickled to `trees/resolution_{id}.pkl`
+- Stops at first solution (SAT)
 
-# Storage
+### Verification
+- Single solver run to check if unexplored branch is SAT/UNSAT
+- Input: (instance, optimality_gap, partial_assignment)
+- Output: SAT or UNSAT only (no trace)
+- Updates parent resolution's pickled tree
 
-I store all information into a Sqlite database
+## Database Schema
 
-For a problem, a partial assignment is a set of assigment in alphabetical order and is unique as such:
+```sql
+-- Instances: problem definitions
+CREATE TABLE instances (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename TEXT NOT NULL,
+    problem_type TEXT NOT NULL,
+    optimal INTEGER NOT NULL,
+    UNIQUE (filename, problem_type)
+);
 
+-- Batches: groups of solver runs
+CREATE TABLE batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    batch_type TEXT NOT NULL,  -- 'root' | 'verification'
+    script_path TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    submitted_at TIMESTAMP,
+    slurm_job_id TEXT
+);
+
+-- Resolutions: root solver runs
+CREATE TABLE resolutions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL,
+    instance_id INTEGER NOT NULL,
+    gap REAL NOT NULL,
+    objective_bound INTEGER NOT NULL,
+    log_path TEXT NOT NULL,
+    tree_path TEXT,  -- trees/resolution_{id}.pkl
+    result TEXT,  -- 'SAT' | 'UNSAT' | 'TIMEOUT' | 'ERROR'
+    FOREIGN KEY (batch_id) REFERENCES batches(id),
+    FOREIGN KEY (instance_id) REFERENCES instances(id)
+);
+
+-- Verifications: unexplored branch checks
+CREATE TABLE verifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL,
+    resolution_id INTEGER NOT NULL,
+    partial_assignment TEXT NOT NULL,
+    objective_bound INTEGER NOT NULL,
+    result TEXT,  -- 'SAT' | 'UNSAT' | 'TIMEOUT' | 'ERROR'
+    FOREIGN KEY (batch_id) REFERENCES batches(id),
+    FOREIGN KEY (resolution_id) REFERENCES resolutions(id)
+);
+
+CREATE INDEX idx_resolutions_batch ON resolutions(batch_id);
+CREATE INDEX idx_resolutions_instance ON resolutions(instance_id);
+CREATE INDEX idx_verifications_batch ON verifications(batch_id);
+CREATE INDEX idx_verifications_resolution ON verifications(resolution_id);
 ```
-x[0,0]!=1
-x[0,1]=3
-x[0,2]=2
+
+## Search Tree Structure
+
+```python
+@dataclass
+class Node:
+    decision: Optional[Tuple[str, str, Any]]  # (var, op, val) or None for root
+    label: Optional[str]  # 'SAT' | 'UNSAT' | 'UNKNOWN' | None
+    children: List['Node']
+    parent: Optional['Node']
+    depth: int
+    
+    def path_from_root(self) -> List[Tuple[str, str, Any]]:
+        """Full path including both x=v and x!=v decisions."""
+        pass
 ```
 
-For each partial assignment, we keep :
-lowest bound (best) found for which it is SAT
-highest bound (worst) for which it is UNSAT
+### Tree Construction from Resolution Trace
+- Parse explored path from trace
+- For each decision `x=v`:
+  - Create explored child: `Node(decision=(x,'=',v), label=from_trace)`
+  - Create unexplored sibling: `Node(decision=(x,'!=',v), label='UNKNOWN')`
+- Pickle to `trees/resolution_{resolution_id}.pkl`
 
-This way we can reuse information between solving process, we update the bounds according to the search trees of each resolutions, but info is common for one partial assignment
+### Tree Update from Verifications
+- Load pickled tree
+- Match verification partial_assignment to node path
+- Update node label: UNKNOWN → SAT/UNSAT
+- Pickle updated tree
 
-# Solving
+## Solver Interface
 
-I use minicpbp.jar to solve problems, here is command line interface for now (might require changes e.g. to pass partial assignment)
+### Root Resolution Command
+```bash
+java -jar minicpbp.jar \
+  --input data/{instance_file} \
+  --bp-algorithm max-product \
+  --branching dom-wdeg \
+  --search-type dfs \
+  --timeout {seconds} \
+  --trace-search \
+  --oracle-on-objective {bound}
+```
 
-/home/axel/.jdks/ms-21.0.8/bin/java -javaagent:/home/axel/.local/share/JetBrains/Toolbox/apps/intellij-idea-community-edition/lib/idea_rt.jar=40929 -Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 -classpath /home/axel/dev/MiniCPBP-MAP/target/classes:/home/axel/.m2/repository/org/xcsp/xcsp3-tools/2.3/xcsp3-tools-2.3.jar:/home/axel/.m2/repository/javax/json/javax.json-api/1.1.2/javax.json-api-1.1.2.jar:/home/axel/.m2/repository/org/glassfish/javax.json/1.1.2/javax.json-1.1.2.jar:/home/axel/.m2/repository/commons-cli/commons-cli/1.4/commons-cli-1.4.jar:/home/axel/.m2/repository/org/antlr/antlr4/4.7/antlr4-4.7.jar:/home/axel/.m2/repository/org/antlr/antlr4-runtime/4.7/antlr4-runtime-4.7.jar:/home/axel/.m2/repository/org/antlr/antlr-runtime/3.5.2/antlr-runtime-3.5.2.jar:/home/axel/.m2/repository/org/antlr/ST4/4.0.8/ST4-4.0.8.jar:/home/axel/.m2/repository/org/abego/treelayout/org.abego.treelayout.core/1.0.3/org.abego.treelayout.core-1.0.3.jar:/home/axel/.m2/repository/com/ibm/icu/icu4j/58.2/icu4j-58.2.jar launch.SolveXCSPFZN
-Missing required options: input, bp-algorithm, branching, search-type, timeout
-usage: solve-XCSP
-    --bp-algorithm <ALGORITHM>              BP algorithm.
-                                            Valid BP algorithms are:
-                                            "max-product",
-                                            "sum-product"
-    --branching <STRATEGY>                  branching strategy.
-                                            Valid branching strategies
-                                            are:
-                                            "dom-wdeg",
-                                            "dom-wdeg-max-marginal",
-                                            "first-fail-random-value",
-                                            "impact-based-search",
-                                            "impact-entropy",
-                                            "impact-min-entropy",
-                                            "max-marginal",
-                                            "max-marginal-regret",
-                                            "max-marginal-strength",
-                                            "min-entropy",
-                                            "min-entropy-biased",
-                                            "min-entropy-dom-wdeg",
-                                            "min-marginal",
-                                            "min-marginal-strength",
-                                            "min-normalized-entropy",
-                                            "min-normalized-entropy-dom-wd
-                                            eg"
-    --cutoff <CUTOF>                        number of failure before
-                                            restart
-    --damp-messages                         damp messages
-    --damping-factor <LAMBDA>               the damping factor used for
-                                            damping the messages
-    --dynamic-stop                          BP iterations are stopped
-                                            dynamically instead of a fixed
-                                            number of iteration
-    --entropy-branching-threshold <FLOAT>   entropy branching threshold.
-                                            Valid entropy branching
-                                            threshold are floats
-    --init-impact                           initialize impact before
-                                            search
-    --input <FILE>                          input FZN or XCSP file
-    --max-iter <ITERATIONS>                 maximum number of belief
-                                            propagation iterations
-    --oracle-on-objective <ORACLE>          oracle on objective.
-                                            Valid oracle on objective are
-                                            floats
-    --propagation-shortcut <BOOL>           propagation shortcut.
-                                            Valid propagation shortcut
-                                            are:
-                                            "False",
-                                            "True",
-                                            "false",
-                                            "true"
-    --reset-marginals-before-bp <BOOL>      reset marginals before BP.
-                                            Valid reset marginals before
-                                            BP are:
-                                            "False",
-                                            "True",
-                                            "false",
-                                            "true"
-    --restart                               authorized restart during
-                                            search (available with dfs
-                                            only)
-    --restart-factor <restartFactor>        factor to increase number of
-                                            failure before restart
-    --search-type <SEARCH>                  search type.
-                                            Valid search types are:
-                                            "dfs",
-                                            "lds"
-    --skip-uniform-max-prod <BOOL>          skip uniform max product.
-                                            Valid skip uniform max prod
-                                            are:
-                                            "False",
-                                            "True",
-                                            "false",
-                                            "true"
-    --solution <FILE>                       file for storing the solution
-    --stats <FILE>                          file for storing the
-                                            statistics
-    --timeout <SECONDS>                     timeout in seconds
-    --trace-bp                              trace the belief propagation
-                                            progress
-    --trace-entropy                         trace the evolution of model's
-                                            entropy after each BP
-                                            iteration
-    --trace-iter                            trace the number of BP
-                                            iterations before each
-                                            branching
-    --trace-search                          trace the search progress
-    --var-threshold <variationThreshold>    threshold on entropy's
-                                            variation under to stop belief
-                                            propagation
-    --verify                                check the correctness of
-                                            obtained solution
+Output: search trace to stdout with:
+- `### branching on x[i,j]=v` lines
+- `SAT` or `UNSAT` leaf labels
 
-Process finished with exit code 1
+### Verification Command
+```bash
+java -jar minicpbp.jar \
+  --input data/{instance_file} \
+  --bp-algorithm max-product \
+  --branching dom-wdeg \
+  --search-type dfs \
+  --timeout {seconds} \
+  --oracle-on-objective {bound} \
+  --assignment "x[0,0]=1,x[0,1]!=2,..."
+```
 
+Output: `SAT` or `UNSAT` in stdout
 
-# Scheduling solving
+## Workflow Commands
 
-I use slurm to schedule solving process
-A python scrit generates a batch script that contains all commands in an array an we run it with sbatch and array_id
+### Setup
+```bash
+schedule.py init-db                      # Create schema
+schedule.py scan-instances xcsp_solved.json  # Import instances
+```
 
+### Phase 1: Root Solving
+```bash
+schedule.py create-root-batch [--limit N]
+schedule.py generate-script <batch_id>
+schedule.py submit-batch <batch_id>
+# Wait for completion
+schedule.py process-root-logs <batch_id>  # Parse traces → pickle trees
+```
+
+### Phase 2: Verification
+```bash
+schedule.py create-verification-batch     # Scan all trees for UNKNOWN nodes
+schedule.py generate-script <batch_id>
+schedule.py submit-batch <batch_id>
+# Wait for completion
+schedule.py process-verification-results <batch_id>  # Update trees
+```
+
+### Analysis
+```bash
+schedule.py extract-stats                 # Process all trees → stats (TBD)
+schedule.py list-batches                  # Show batch status
+```
+
+## Partial Assignment Format
+
+Alphabetically sorted, comma-separated:
+```
+x[0,0]!=1,x[0,1]=3,x[0,2]=2
+```
+
+Both positive (`=`) and negative (`!=`) assignments included.
+
+## Open Questions for Implementation
+
+1. **Verification timeout handling**: Should TIMEOUT verifications be retried, or left as UNKNOWN?
+
+2. **Tree update strategy**: Sequential processing sufficient, or worth parallelizing?
+
+3. **Stats schema**: What metrics per instance? Per (instance, gap)? Tree depth, branching factor, SAT/UNSAT ratio?
+
+4. **Verification batch size limits**: Should there be a max array size for SLURM, requiring multiple verification batches?
+
+5. **Error recovery**: If verification fails, should node remain UNKNOWN or be marked ERROR?
+
+Ready to proceed with implementation?
