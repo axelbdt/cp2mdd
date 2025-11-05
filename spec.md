@@ -5,8 +5,9 @@
 System for evaluating CSP solver behavior across optimality gaps by:
 1. Solving instances at various gaps, capturing search traces
 2. Building search trees from traces (explored paths only)
-3. Verifying unexplored branches (negations) to label all nodes
-4. Analyzing complete trees for algorithm evaluation
+3. We need to know if unexplored branches are SAT/UNSAT subtrees, we run complementary verifications
+4. We build from all resolutions and verifications, a map of the "search space" for a given instance, in ordre to reuse data while labeling for other optimality gaps
+5. We iterate over all this to annotate all choices of every resolutions
 
 ## Data Model
 
@@ -18,85 +19,24 @@ System for evaluating CSP solver behavior across optimality gaps by:
 ### Resolution
 - Single solver run: (instance, optimality_gap)
 - Produces search trace with explored path
-- Generates search tree pickled to `trees/resolution_{id}.pkl`
 - Stops at first solution (SAT)
+- Generates search tree pickled to `trees/resolution_{id}.pkl`
+- Incrementally build a map of the search space pickled to `maps/instance_{id}.pkl`
 
 ### Verification
 - Single solver run to check if unexplored branch is SAT/UNSAT
 - Input: (instance, optimality_gap, partial_assignment)
 - Output: SAT or UNSAT only (no trace)
-- Updates parent resolution's pickled tree
+- Updates map when trees are processed
 
 ## Database Schema
 
-```sql
--- Instances: problem definitions
-CREATE TABLE instances (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    filename TEXT NOT NULL,
-    problem_type TEXT NOT NULL,
-    optimal INTEGER NOT NULL,
-    UNIQUE (filename, problem_type)
-);
+see create_db.sql
 
--- Batches: groups of solver runs
-CREATE TABLE batches (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    batch_type TEXT NOT NULL,  -- 'root' | 'verification'
-    script_path TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    submitted_at TIMESTAMP,
-    slurm_job_id TEXT
-);
-
--- Resolutions: root solver runs
-CREATE TABLE resolutions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    batch_id INTEGER NOT NULL,
-    instance_id INTEGER NOT NULL,
-    gap REAL NOT NULL,
-    objective_bound INTEGER NOT NULL,
-    log_path TEXT NOT NULL,
-    tree_path TEXT,  -- trees/resolution_{id}.pkl
-    result TEXT,  -- 'SAT' | 'UNSAT' | 'TIMEOUT' | 'ERROR'
-    FOREIGN KEY (batch_id) REFERENCES batches(id),
-    FOREIGN KEY (instance_id) REFERENCES instances(id)
-);
-
--- Verifications: unexplored branch checks
-CREATE TABLE verifications (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    batch_id INTEGER NOT NULL,
-    resolution_id INTEGER NOT NULL,
-    partial_assignment TEXT NOT NULL,
-    objective_bound INTEGER NOT NULL,
-    result TEXT,  -- 'SAT' | 'UNSAT' | 'TIMEOUT' | 'ERROR'
-    FOREIGN KEY (batch_id) REFERENCES batches(id),
-    FOREIGN KEY (resolution_id) REFERENCES resolutions(id)
-);
-
-CREATE INDEX idx_resolutions_batch ON resolutions(batch_id);
-CREATE INDEX idx_resolutions_instance ON resolutions(instance_id);
-CREATE INDEX idx_verifications_batch ON verifications(batch_id);
-CREATE INDEX idx_verifications_resolution ON verifications(resolution_id);
-```
 
 ## Search Tree Structure
 
-```python
-@dataclass
-class Node:
-    decision: Optional[Tuple[str, str, Any]]  # (var, op, val) or None for root
-    label: Optional[str]  # 'SAT' | 'UNSAT' | 'UNKNOWN' | None
-    children: List['Node']
-    parent: Optional['Node']
-    depth: int
-    
-    def path_from_root(self) -> List[Tuple[str, str, Any]]:
-        """Full path including both x=v and x!=v decisions."""
-        pass
-```
+see search_tree.py
 
 ### Tree Construction from Resolution Trace
 - Parse explored path from trace
@@ -105,11 +45,23 @@ class Node:
   - Create unexplored sibling: `Node(decision=(x,'!=',v), label='UNKNOWN')`
 - Pickle to `trees/resolution_{resolution_id}.pkl`
 
-### Tree Update from Verifications
-- Load pickled tree
-- Match verification partial_assignment to node path
-- Update node label: UNKNOWN → SAT/UNSAT
-- Pickle updated tree
+
+## Map Structure
+
+It is a tree structure where a partial assignment is a series of branches in lexicographic order.
+We maintain for each node a lowest SAT (which is the score of the best solution found in the subtree), as well as the lowest upperbound for which the the subtree is UNSAT.
+
+e.g. root node has lowest SAT = optimal, upper bound UNSAT = optimal - 1
+for some other node we might find a solution with score 100, but find the subtree is UNSAT if we place an upperbound of 90. Then lowest SAT = 100, upper bound UNSAT = 90
+
+### Map Construction
+
+- For a search tree
+  - for each node try to label from search trace or instance map
+  - if not possible create a verification task
+- Run all verifications
+- Update map from all verifications
+
 
 ## Solver Interface
 
@@ -117,27 +69,28 @@ class Node:
 ```bash
 java -jar minicpbp.jar \
   --input data/{instance_file} \
-  --bp-algorithm max-product \
-  --branching dom-wdeg \
+  --bp-algorithm {config.algorithm} \
+  --branching {config.branching} \
   --search-type dfs \
   --timeout {seconds} \
   --trace-search \
-  --oracle-on-objective {bound}
+  --oracle-on-objective {config.oracle_on_objective} \
+  --upper-bound {resolution.actual_bound}
 ```
 
 Output: search trace to stdout with:
 - `### branching on x[i,j]=v` lines
-- `SAT` or `UNSAT` leaf labels
+- `SAT` when a solution is found
 
 ### Verification Command
 ```bash
 java -jar minicpbp.jar \
+  --verification \
   --input data/{instance_file} \
-  --bp-algorithm max-product \
+  --bp-algorithm no-bp \
   --branching dom-wdeg \
   --search-type dfs \
   --timeout {seconds} \
-  --oracle-on-objective {bound} \
   --assignment "x[0,0]=1,x[0,1]!=2,..."
 ```
 
@@ -145,35 +98,17 @@ Output: `SAT` or `UNSAT` in stdout
 
 ## Workflow Commands
 
-### Setup
-```bash
-schedule.py init-db                      # Create schema
-schedule.py scan-instances xcsp_solved.json  # Import instances
-```
+Create database, popoulate instances from `xcsp_solved.json` and configurations from `config.py`
 
-### Phase 1: Root Solving
-```bash
-schedule.py create-root-batch [--limit N]
-schedule.py generate-script <batch_id>
-schedule.py submit-batch <batch_id>
-# Wait for completion
-schedule.py process-root-logs <batch_id>  # Parse traces → pickle trees
-```
+Generate resolutions : one for each instance and optimality gap and config
 
-### Phase 2: Verification
-```bash
-schedule.py create-verification-batch     # Scan all trees for UNKNOWN nodes
-schedule.py generate-script <batch_id>
-schedule.py submit-batch <batch_id>
-# Wait for completion
-schedule.py process-verification-results <batch_id>  # Update trees
-```
+Generate verifications : parse search trees, label nodes from search traces and create verification tasks for unkown nodes
 
-### Analysis
-```bash
-schedule.py extract-stats                 # Process all trees → stats (TBD)
-schedule.py list-batches                  # Show batch status
-```
+If a batch of verifications has been run and logs are not processed, process it, i.e. update the map and search trees
+
+Generate verification batch : for each verification task never run, check if the node can be labeled from the instance map, if not put it in the next verification batch (until batch limit is reached)
+generate verification batch script and schedule verifications on SLURM
+
 
 ## Partial Assignment Format
 
@@ -184,16 +119,12 @@ x[0,0]!=1,x[0,1]=3,x[0,2]=2
 
 Both positive (`=`) and negative (`!=`) assignments included.
 
-## Open Questions for Implementation
+## Additional Considerations
 
-1. **Verification timeout handling**: Should TIMEOUT verifications be retried, or left as UNKNOWN?
+1. **Verification timeout handling**: Should TIMEOUT verifications be retried with a 2x larger timeout
 
-2. **Tree update strategy**: Sequential processing sufficient, or worth parallelizing?
+2. **Tree update strategy**: Sequential processing sufficient
 
-3. **Stats schema**: What metrics per instance? Per (instance, gap)? Tree depth, branching factor, SAT/UNSAT ratio?
+4. **Verification batch size limits**: Max array size is 700 but with a configurable constant in script
 
-4. **Verification batch size limits**: Should there be a max array size for SLURM, requiring multiple verification batches?
-
-5. **Error recovery**: If verification fails, should node remain UNKNOWN or be marked ERROR?
-
-Ready to proceed with implementation?
+5. **Error recovery**: If verification, parsing, ... fails should be marked error and retried
