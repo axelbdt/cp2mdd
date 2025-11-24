@@ -49,8 +49,51 @@ System for evaluating CSP solver behavior across optimality gaps by:
 
 ## Database Schema
 
-see create_db.sql
+```sql
+CREATE TABLE instances (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename TEXT NOT NULL,
+    problem_type TEXT NOT NULL,
+    optimal INTEGER NOT NULL,
+    UNIQUE (filename, problem_type)
+);
 
+CREATE TABLE batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    batch_type TEXT NOT NULL,  -- 'root' | 'root_retry' | 'verification' | 'verification_retry'
+    script_path TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    submitted_at TIMESTAMP,
+    slurm_job_id TEXT
+);
+
+CREATE TABLE resolutions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL,
+    instance_id INTEGER NOT NULL,
+    gap REAL NOT NULL,
+    objective_bound INTEGER NOT NULL,
+    timeout_seconds INTEGER NOT NULL DEFAULT 3600,
+    log_path TEXT NOT NULL,
+    tree_path TEXT,
+    result TEXT,  -- 'SAT' | 'UNSAT' | 'TIMEOUT' | 'ERROR' | NULL
+    FOREIGN KEY (batch_id) REFERENCES batches(id),
+    FOREIGN KEY (instance_id) REFERENCES instances(id)
+);
+
+CREATE TABLE verifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL,
+    resolution_id INTEGER NOT NULL,
+    partial_assignment TEXT NOT NULL,
+    objective_bound INTEGER NOT NULL,
+    timeout_seconds INTEGER NOT NULL DEFAULT 3600,
+    result TEXT,  -- 'SAT' | 'UNSAT' | 'TIMEOUT' | 'ERROR' | NULL
+    FOREIGN KEY (batch_id) REFERENCES batches(id),
+    FOREIGN KEY (resolution_id) REFERENCES resolutions(id)
+);
+```
 
 ## Search Tree Structure
 
@@ -63,8 +106,6 @@ see search_tree.py
   - Create unexplored sibling: `Node(decision=(x,'!=',v), label='UNKNOWN')`
 - Pickle to `trees/resolution_{resolution_id}.pkl`
 
-
-
 ## Solver Interface
 
 ### Root Resolution Command
@@ -74,7 +115,7 @@ java -jar minicpbp.jar \
   --bp-algorithm {config.algorithm} \
   --branching {config.branching} \
   --search-type dfs \
-  --timeout {seconds} \
+  --timeout {timeout_seconds} \
   --trace-search \
   --oracle-on-objective {config.oracle_on_objective} \
   --upper-bound {resolution.actual_bound}
@@ -83,6 +124,7 @@ java -jar minicpbp.jar \
 Output: search trace to stdout with:
 - `### branching on x[i,j]=v` lines
 - `SAT` when a solution is found
+- `TIMEOUT` when time limit exceeded
 
 ### Verification Command
 ```bash
@@ -92,11 +134,11 @@ java -jar minicpbp.jar \
   --bp-algorithm no-bp \
   --branching dom-wdeg \
   --search-type dfs \
-  --timeout {seconds} \
+  --timeout {timeout_seconds} \
   --assignment "x[0,0]=1,x[0,1]!=2,..."
 ```
 
-Output: `SAT` or `UNSAT` in stdout
+Output: `SAT`, `UNSAT`, or `TIMEOUT` in stdout
 
 # State Machine Workflow
 
@@ -127,11 +169,15 @@ Output: `SAT` or `UNSAT` in stdout
 **Action**: None (informational state - SLURM jobs still executing)
 
 ### process_root_logs:{batch_id}
-**Condition**: No SLURM jobs running AND some resolutions lack tree_path
-**Action**: Parse logs, build trees with UNKNOWN siblings, pickle to trees/
+**Condition**: No SLURM jobs running AND some resolutions have result IS NULL
+**Action**: Parse logs, extract result (SAT/UNSAT/TIMEOUT/ERROR), build trees with UNKNOWN siblings for SAT/UNSAT, pickle to trees/
+
+### create_root_retry_batch:{batch_id}
+**Condition**: Root batch processed AND some resolutions have result = 'TIMEOUT' AND timeout_seconds * 2 <= MAX_TIMEOUT
+**Action**: Move TIMEOUT resolutions to new root_retry batch, double timeout_seconds, clear result/tree_path
 
 ### create_verification_batch
-**Condition**: All root trees built AND no verification batch exists
+**Condition**: All root trees built (no more retryable timeouts) AND no verification batch exists
 **Action**: Scan all trees for UNKNOWN nodes, create verification tasks
 
 ### generate_verification_script:{batch_id}
@@ -147,11 +193,15 @@ Output: `SAT` or `UNSAT` in stdout
 **Action**: None (informational state - SLURM jobs still executing)
 
 ### process_verification_results:{batch_id}
-**Condition**: No SLURM jobs running AND verification trees need updating
-**Action**: Update tree node labels from verification results, re-pickle
+**Condition**: No SLURM jobs running AND some verifications have result IS NULL
+**Action**: Parse logs, extract result, update tree node labels for SAT/UNSAT, re-pickle trees
+
+### create_verification_retry_batch:{batch_id}
+**Condition**: Verification batch processed AND some verifications have result = 'TIMEOUT' AND timeout_seconds * 2 <= MAX_TIMEOUT
+**Action**: Move TIMEOUT verifications to new verification_retry batch, double timeout_seconds, clear result
 
 ### complete
-**Condition**: All verification results processed into trees
+**Condition**: All verification results processed into trees (no more retryable timeouts)
 **Action**: None
 
 ## Execution Pattern
@@ -171,6 +221,18 @@ wait_root_batch (polls squeue until empty)
   ↓
 process_root_logs
   ↓
+create_root_retry_batch (if TIMEOUT results exist)
+  ↓
+generate_root_script (retry batch)
+  ↓
+submit_root_batch
+  ↓
+wait_root_batch
+  ↓
+process_root_logs (retry batch)
+  ↓
+[loop until no more retryable TIMEOUTs or MAX_TIMEOUT reached]
+  ↓
 create_verification_batch
   ↓
 generate_verification_script
@@ -180,6 +242,18 @@ submit_verification_batch
 wait_verification_batch (polls squeue until empty)
   ↓
 process_verification_results
+  ↓
+create_verification_retry_batch (if TIMEOUT results exist)
+  ↓
+generate_verification_script (retry batch)
+  ↓
+submit_verification_batch
+  ↓
+wait_verification_batch
+  ↓
+process_verification_results (retry batch)
+  ↓
+[loop until no more retryable TIMEOUTs or MAX_TIMEOUT reached]
   ↓
 complete
 ```
@@ -205,7 +279,6 @@ The script exits during wait states. Re-run to check status and advance when rea
 while true; do ./schedule.py && sleep 60 || break; done
 ```
 
-
 ## Partial Assignment Format
 
 Alphabetically sorted, comma-separated:
@@ -215,18 +288,35 @@ x[0,0]!=1,x[0,1]=3,x[0,2]=2
 
 Both positive (`=`) and negative (`!=`) assignments included.
 
+## Timeout Management
+
+### Retry Mechanism
+- When resolution or verification completes with `TIMEOUT` result:
+  1. Row is moved to new retry batch (batch_type = 'root_retry' or 'verification_retry')
+  2. `timeout_seconds` is doubled
+  3. `result` and `tree_path` are cleared
+  4. New log path is generated
+
+### Retry Limits
+- Maximum timeout: `MAX_TIMEOUT = 14400` (4 hours)
+- Timeouts exceeding this limit are not retried
+- Original resolution/verification ID is preserved
+
+### State Derivation
+No explicit status column - state is derived from:
+- `result IS NULL` → pending log processing
+- `result = 'TIMEOUT'` → needs retry (if timeout_seconds * 2 <= MAX_TIMEOUT)
+- `result IN ('SAT', 'UNSAT')` → completed successfully
+- `result = 'ERROR'` → parsing or solver error
+
 ## Additional Considerations
 
-1. **Verification timeout handling**: TIMEOUT verifications should be retried with a 2x larger timeout
+1. **Verification timeout handling**: TIMEOUT verifications are retried with 2x timeout up to MAX_TIMEOUT
 
 2. **Tree update strategy**: Sequential processing sufficient
 
-4. **Verification batch size limits**: Max array size is 700 but with a configurable constant in script
+3. **Verification batch size limits**: Max array size is 1000 (SLURM limit)
 
-5. **Error recovery**: If verification, parsing, ... fails should be marked error and retried
+4. **Error recovery**: ERROR results indicate parsing failures or solver crashes - manual investigation required
 
-## Timeout management
-
-Add a timeout to resolutions and verifications, if a timeout is reached, this should appear in the logs and result will be marked as timeout.
-We'll generate
-
+5. **Batch type tracking**: New batch types 'root_retry' and 'verification_retry' for audit trail

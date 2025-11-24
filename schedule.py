@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal state-driven CSP experiment scheduler."""
+"""Minimal state-driven CSP experiment scheduler with timeout retry support."""
 
 import json
 import pickle
@@ -17,6 +17,7 @@ from search import Node, SearchTree
 DB_PATH = "experiments.db"
 GAPS = [0, 0.5, 0.8, 0.9, 0.95, 0.96, 0.97, 0.98, 0.99]
 TIMEOUT = 3600
+MAX_TIMEOUT = 14400  # 4 hours - don't retry beyond this
 SOLVER_JAR = "minicpbp.jar"
 
 
@@ -62,6 +63,7 @@ def init_database():
         instance_id INTEGER NOT NULL,
         gap REAL NOT NULL,
         objective_bound INTEGER NOT NULL,
+        timeout_seconds INTEGER NOT NULL DEFAULT 3600,
         log_path TEXT NOT NULL,
         tree_path TEXT,
         result TEXT,
@@ -75,6 +77,7 @@ def init_database():
         resolution_id INTEGER NOT NULL,
         partial_assignment TEXT NOT NULL,
         objective_bound INTEGER NOT NULL,
+        timeout_seconds INTEGER NOT NULL DEFAULT 3600,
         result TEXT,
         FOREIGN KEY (batch_id) REFERENCES batches(id),
         FOREIGN KEY (resolution_id) REFERENCES resolutions(id)
@@ -162,10 +165,10 @@ def create_root_batch():
                 cursor.execute(
                     """
                     INSERT INTO resolutions 
-                    (batch_id, instance_id, gap, objective_bound, log_path)
-                    VALUES (?, ?, ?, ?, ?)
+                    (batch_id, instance_id, gap, objective_bound, timeout_seconds, log_path)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (batch_id, inst_id, gap, bound, log_path),
+                    (batch_id, inst_id, gap, bound, TIMEOUT, log_path),
                 )
                 resolution_count += 1
 
@@ -177,6 +180,7 @@ def create_root_batch():
 def build_solver_command(
     instance_file: str,
     objective_bound: int,
+    timeout_seconds: int,
     partial_assignment: Optional[str] = None,
     trace_search: bool = True,
 ) -> str:
@@ -201,7 +205,7 @@ def build_solver_command(
             "--search-type",
             "dfs",
             "--timeout",
-            str(TIMEOUT),
+            str(timeout_seconds),
             f"--oracle-on-objective {objective_bound}",
         ]
     )
@@ -226,10 +230,10 @@ def generate_script(batch_id: int) -> Path:
 
         batch_name, batch_type = batch_row
 
-        if batch_type == "root":
+        if batch_type in ["root", "root_retry"]:
             cursor.execute(
                 """
-                SELECT r.id, r.objective_bound, r.log_path, i.filename
+                SELECT r.id, r.objective_bound, r.timeout_seconds, r.log_path, i.filename
                 FROM resolutions r
                 JOIN instances i ON r.instance_id = i.id
                 WHERE r.batch_id = ?
@@ -237,10 +241,10 @@ def generate_script(batch_id: int) -> Path:
                 """,
                 (batch_id,),
             )
-        else:  # verification
+        else:  # verification or verification_retry
             cursor.execute(
                 """
-                SELECT v.id, v.objective_bound, v.partial_assignment,
+                SELECT v.id, v.objective_bound, v.timeout_seconds, v.partial_assignment,
                        i.filename, r.log_path
                 FROM verifications v
                 JOIN resolutions r ON v.resolution_id = r.id
@@ -274,25 +278,25 @@ def generate_script(batch_id: int) -> Path:
 
         script_lines.extend(["", "COMMANDS=("])
 
-        if batch_type == "root":
-            for task_id, bound, log_path, filename in rows:
-                cmd = build_solver_command(filename, bound, trace_search=True)
+        if batch_type in ["root", "root_retry"]:
+            for task_id, bound, timeout, log_path, filename in rows:
+                cmd = build_solver_command(filename, bound, timeout, trace_search=True)
                 script_lines.append(f'  "{cmd.replace(chr(34), chr(92)+chr(34))}"')
         else:
-            for task_id, bound, assignment, filename, _ in rows:
+            for task_id, bound, timeout, assignment, filename, _ in rows:
                 cmd = build_solver_command(
-                    filename, bound, assignment, trace_search=False
+                    filename, bound, timeout, assignment, trace_search=False
                 )
                 script_lines.append(f'  "{cmd.replace(chr(34), chr(92)+chr(34))}"')
 
         script_lines.append(")")
         script_lines.extend(["", "LOG_FILES=("])
 
-        if batch_type == "root":
-            for _, _, log_path, _ in rows:
+        if batch_type in ["root", "root_retry"]:
+            for _, _, _, log_path, _ in rows:
                 script_lines.append(f'  "{log_path}"')
         else:
-            for task_id, _, _, _, base_log_path in rows:
+            for task_id, _, _, _, _, base_log_path in rows:
                 log_dir = Path(base_log_path).parent
                 log_path = log_dir / f"verification_{task_id}.log"
                 script_lines.append(f'  "{log_path}"')
@@ -419,17 +423,24 @@ def process_root_logs(batch_id: int):
                 else:
                     result = "ERROR"
 
-                tree = SearchTree.from_log(log_text)
-                tree_with_unknowns = add_unexplored_siblings(tree.root)
+                if result in ["SAT", "UNSAT"]:
+                    tree = SearchTree.from_log(log_text)
+                    tree_with_unknowns = add_unexplored_siblings(tree.root)
 
-                tree_path = trees_dir / f"resolution_{res_id}.pkl"
-                with open(tree_path, "wb") as f:
-                    pickle.dump(tree_with_unknowns, f)
+                    tree_path = trees_dir / f"resolution_{res_id}.pkl"
+                    with open(tree_path, "wb") as f:
+                        pickle.dump(tree_with_unknowns, f)
 
-                cursor.execute(
-                    "UPDATE resolutions SET result = ?, tree_path = ? WHERE id = ?",
-                    (result, str(tree_path), res_id),
-                )
+                    cursor.execute(
+                        "UPDATE resolutions SET result = ?, tree_path = ? WHERE id = ?",
+                        (result, str(tree_path), res_id),
+                    )
+                else:
+                    # TIMEOUT or ERROR - no tree
+                    cursor.execute(
+                        "UPDATE resolutions SET result = ? WHERE id = ?",
+                        (result, res_id),
+                    )
 
                 processed += 1
 
@@ -441,6 +452,64 @@ def process_root_logs(batch_id: int):
                 errors += 1
 
         print(f"Processed {processed} logs, {errors} errors")
+
+
+def create_root_retry_batch(original_batch_id: int):
+    with db_connection() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT r.id, r.instance_id, r.gap, r.objective_bound, r.timeout_seconds
+            FROM resolutions r
+            WHERE r.batch_id = ? AND r.result = 'TIMEOUT'
+            """,
+            (original_batch_id,),
+        )
+        timeouts = cursor.fetchall()
+
+        if not timeouts:
+            print("No timeouts to retry")
+            return None
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        batch_name = f"root_retry_{timestamp}"
+
+        cursor.execute(
+            "INSERT INTO batches (name, batch_type) VALUES (?, 'root_retry')",
+            (batch_name,),
+        )
+        retry_batch_id = cursor.lastrowid
+
+        retry_count = 0
+        skip_count = 0
+
+        for res_id, inst_id, gap, bound, old_timeout in timeouts:
+            new_timeout = old_timeout * 2
+
+            if new_timeout > MAX_TIMEOUT:
+                skip_count += 1
+                continue
+
+            new_log_path = f"logs/{batch_name}/resolution_{res_id}.log"
+
+            cursor.execute(
+                """
+                UPDATE resolutions
+                SET batch_id = ?,
+                    timeout_seconds = ?,
+                    log_path = ?,
+                    result = NULL,
+                    tree_path = NULL
+                WHERE id = ?
+                """,
+                (retry_batch_id, new_timeout, new_log_path, res_id),
+            )
+            retry_count += 1
+
+        print(f"Created retry batch {retry_batch_id}: {batch_name}")
+        print(f"  {retry_count} retries, {skip_count} skipped (max timeout reached)")
+        return retry_batch_id
 
 
 def find_unknown_nodes(root: Node) -> List[Node]:
@@ -508,10 +577,10 @@ def create_verification_batch():
                     cursor.execute(
                         """
                         INSERT INTO verifications
-                        (batch_id, resolution_id, partial_assignment, objective_bound)
-                        VALUES (?, ?, ?, ?)
+                        (batch_id, resolution_id, partial_assignment, objective_bound, timeout_seconds)
+                        VALUES (?, ?, ?, ?, ?)
                         """,
-                        (batch_id, res_id, normalized, bound),
+                        (batch_id, res_id, normalized, bound, TIMEOUT),
                     )
                     verification_count += 1
 
@@ -612,9 +681,10 @@ def process_verification_results(batch_id: int):
                         (result, ver_id),
                     )
 
-                    node = find_node_by_path(root, assignment)
-                    if node and result in ["SAT", "UNSAT"]:
-                        node.label = result
+                    if result in ["SAT", "UNSAT"]:
+                        node = find_node_by_path(root, assignment)
+                        if node:
+                            node.label = result
 
                 with open(tree_path, "wb") as f:
                     pickle.dump(root, f)
@@ -626,6 +696,61 @@ def process_verification_results(batch_id: int):
         print("Verification results processed")
 
 
+def create_verification_retry_batch(original_batch_id: int):
+    with db_connection() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT v.id, v.resolution_id, v.partial_assignment, 
+                   v.objective_bound, v.timeout_seconds
+            FROM verifications v
+            WHERE v.batch_id = ? AND v.result = 'TIMEOUT'
+            """,
+            (original_batch_id,),
+        )
+        timeouts = cursor.fetchall()
+
+        if not timeouts:
+            print("No verification timeouts to retry")
+            return None
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        batch_name = f"verification_retry_{timestamp}"
+
+        cursor.execute(
+            "INSERT INTO batches (name, batch_type) VALUES (?, 'verification_retry')",
+            (batch_name,),
+        )
+        retry_batch_id = cursor.lastrowid
+
+        retry_count = 0
+        skip_count = 0
+
+        for ver_id, res_id, assignment, bound, old_timeout in timeouts:
+            new_timeout = old_timeout * 2
+
+            if new_timeout > MAX_TIMEOUT:
+                skip_count += 1
+                continue
+
+            cursor.execute(
+                """
+                UPDATE verifications
+                SET batch_id = ?,
+                    timeout_seconds = ?,
+                    result = NULL
+                WHERE id = ?
+                """,
+                (retry_batch_id, new_timeout, ver_id),
+            )
+            retry_count += 1
+
+        print(f"Created verification retry batch {retry_batch_id}: {batch_name}")
+        print(f"  {retry_count} retries, {skip_count} skipped (max timeout reached)")
+        return retry_batch_id
+
+
 def has_running_jobs() -> bool:
     """Check if any SLURM jobs are running for current user."""
     try:
@@ -634,14 +759,12 @@ def has_running_jobs() -> bool:
             ["squeue", "-u", user], capture_output=True, text=True, timeout=10
         )
         lines = [line for line in result.stdout.strip().split("\n") if line]
-        # Only header line means no jobs running
         return len(lines) > 1
     except (
         subprocess.CalledProcessError,
         subprocess.TimeoutExpired,
         FileNotFoundError,
     ):
-        # If squeue fails, assume jobs are running
         return True
 
 
@@ -682,19 +805,64 @@ def detect_state():
         if not submitted_at:
             return f"submit_root_batch:{batch_id}"
 
-        # Check if any SLURM jobs running
         if has_running_jobs():
             return f"wait_root_batch:{batch_id}"
 
-        # Jobs finished, check for unprocessed logs
         cursor.execute(
-            "SELECT COUNT(*) FROM resolutions WHERE batch_id = ? AND tree_path IS NULL",
+            "SELECT COUNT(*) FROM resolutions WHERE batch_id = ? AND result IS NULL",
             (batch_id,),
         )
         unprocessed_logs = cursor.fetchone()[0]
 
         if unprocessed_logs > 0:
             return f"process_root_logs:{batch_id}"
+
+        # Check for root timeouts needing retry
+        cursor.execute(
+            "SELECT COUNT(*) FROM resolutions WHERE batch_id = ? AND result = 'TIMEOUT'",
+            (batch_id,),
+        )
+        if cursor.fetchone()[0] > 0:
+            return f"create_root_retry_batch:{batch_id}"
+
+        # Check for root retry batch
+        cursor.execute(
+            "SELECT id FROM batches WHERE batch_type = 'root_retry' ORDER BY created_at DESC LIMIT 1"
+        )
+        retry_batch = cursor.fetchone()
+
+        if retry_batch:
+            retry_batch_id = retry_batch[0]
+
+            cursor.execute(
+                "SELECT script_path, submitted_at FROM batches WHERE id = ?",
+                (retry_batch_id,),
+            )
+            retry_script_path, retry_submitted_at = cursor.fetchone()
+
+            if not retry_script_path:
+                return f"generate_root_script:{retry_batch_id}"
+
+            if not retry_submitted_at:
+                return f"submit_root_batch:{retry_batch_id}"
+
+            if has_running_jobs():
+                return f"wait_root_batch:{retry_batch_id}"
+
+            cursor.execute(
+                "SELECT COUNT(*) FROM resolutions WHERE batch_id = ? AND result IS NULL",
+                (retry_batch_id,),
+            )
+            if cursor.fetchone()[0] > 0:
+                return f"process_root_logs:{retry_batch_id}"
+
+            # Check if retry batch has more timeouts
+            cursor.execute(
+                "SELECT COUNT(*) FROM resolutions WHERE batch_id = ? AND result = 'TIMEOUT'",
+                (retry_batch_id,),
+            )
+            if cursor.fetchone()[0] > 0:
+                return f"create_root_retry_batch:{retry_batch_id}"
 
         cursor.execute(
             "SELECT id FROM batches WHERE batch_type = 'verification' ORDER BY created_at DESC LIMIT 1"
@@ -718,19 +886,62 @@ def detect_state():
         if not ver_submitted_at:
             return f"submit_verification_batch:{ver_batch_id}"
 
-        # Check if any SLURM jobs running
         if has_running_jobs():
             return f"wait_verification_batch:{ver_batch_id}"
 
-        # Jobs finished, check for unprocessed results
         cursor.execute(
-            "SELECT COUNT(*) FROM resolutions WHERE batch_id = ? AND tree_path IS NOT NULL",
-            (batch_id,),
+            "SELECT COUNT(*) FROM verifications WHERE batch_id = ? AND result IS NULL",
+            (ver_batch_id,),
         )
-        trees_exist = cursor.fetchone()[0]
-
-        if trees_exist > 0:
+        if cursor.fetchone()[0] > 0:
             return f"process_verification_results:{ver_batch_id}"
+
+        # Check for verification timeouts needing retry
+        cursor.execute(
+            "SELECT COUNT(*) FROM verifications WHERE batch_id = ? AND result = 'TIMEOUT'",
+            (ver_batch_id,),
+        )
+        if cursor.fetchone()[0] > 0:
+            return f"create_verification_retry_batch:{ver_batch_id}"
+
+        # Check for verification retry batch
+        cursor.execute(
+            "SELECT id FROM batches WHERE batch_type = 'verification_retry' ORDER BY created_at DESC LIMIT 1"
+        )
+        ver_retry_batch = cursor.fetchone()
+
+        if ver_retry_batch:
+            ver_retry_batch_id = ver_retry_batch[0]
+
+            cursor.execute(
+                "SELECT script_path, submitted_at FROM batches WHERE id = ?",
+                (ver_retry_batch_id,),
+            )
+            ver_retry_script_path, ver_retry_submitted_at = cursor.fetchone()
+
+            if not ver_retry_script_path:
+                return f"generate_verification_script:{ver_retry_batch_id}"
+
+            if not ver_retry_submitted_at:
+                return f"submit_verification_batch:{ver_retry_batch_id}"
+
+            if has_running_jobs():
+                return f"wait_verification_batch:{ver_retry_batch_id}"
+
+            cursor.execute(
+                "SELECT COUNT(*) FROM verifications WHERE batch_id = ? AND result IS NULL",
+                (ver_retry_batch_id,),
+            )
+            if cursor.fetchone()[0] > 0:
+                return f"process_verification_results:{ver_retry_batch_id}"
+
+            # Check if retry batch has more timeouts
+            cursor.execute(
+                "SELECT COUNT(*) FROM verifications WHERE batch_id = ? AND result = 'TIMEOUT'",
+                (ver_retry_batch_id,),
+            )
+            if cursor.fetchone()[0] > 0:
+                return f"create_verification_retry_batch:{ver_retry_batch_id}"
 
         return "complete"
 
@@ -769,6 +980,10 @@ def main():
         batch_id = int(state.split(":")[1])
         process_root_logs(batch_id)
 
+    elif state.startswith("create_root_retry_batch:"):
+        batch_id = int(state.split(":")[1])
+        create_root_retry_batch(batch_id)
+
     elif state == "create_verification_batch":
         create_verification_batch()
 
@@ -786,6 +1001,10 @@ def main():
     elif state.startswith("process_verification_results:"):
         batch_id = int(state.split(":")[1])
         process_verification_results(batch_id)
+
+    elif state.startswith("create_verification_retry_batch:"):
+        batch_id = int(state.split(":")[1])
+        create_verification_retry_batch(batch_id)
 
     elif state == "complete":
         print("All batches complete")
