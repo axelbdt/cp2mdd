@@ -98,7 +98,7 @@ java -jar minicpbp.jar \
 
 Output: `SAT` or `UNSAT` in stdout
 
-# Workflow
+# State Machine Workflow
 
 ## State Detection Logic
 
@@ -122,12 +122,12 @@ Output: `SAT` or `UNSAT` in stdout
 **Condition**: Script exists AND batch not submitted (submitted_at is NULL)
 **Action**: Submit to SLURM, record job_id
 
-### wait_root_batch:{batch_id}:{completed}/{total}
-**Condition**: Batch submitted AND some resolutions lack result
-**Action**: None (informational state)
+### wait_root_batch:{batch_id}
+**Condition**: Batch submitted AND `squeue -u $USER` shows running jobs
+**Action**: None (informational state - SLURM jobs still executing)
 
 ### process_root_logs:{batch_id}
-**Condition**: All resolutions have result AND some lack tree_path
+**Condition**: No SLURM jobs running AND some resolutions lack tree_path
 **Action**: Parse logs, build trees with UNKNOWN siblings, pickle to trees/
 
 ### create_verification_batch
@@ -142,12 +142,12 @@ Output: `SAT` or `UNSAT` in stdout
 **Condition**: Script exists AND batch not submitted
 **Action**: Submit to SLURM
 
-### wait_verification_batch:{batch_id}:{completed}/{total}
-**Condition**: Batch submitted AND some verifications lack result
-**Action**: None (informational state)
+### wait_verification_batch:{batch_id}
+**Condition**: Batch submitted AND `squeue -u $USER` shows running jobs
+**Action**: None (informational state - SLURM jobs still executing)
 
 ### process_verification_results:{batch_id}
-**Condition**: All verifications have result AND trees need updating
+**Condition**: No SLURM jobs running AND verification trees need updating
 **Action**: Update tree node labels from verification results, re-pickle
 
 ### complete
@@ -167,7 +167,7 @@ generate_root_script
   ↓
 submit_root_batch
   ↓
-wait_root_batch (external: SLURM completes)
+wait_root_batch (polls squeue until empty)
   ↓
 process_root_logs
   ↓
@@ -177,12 +177,20 @@ generate_verification_script
   ↓
 submit_verification_batch
   ↓
-wait_verification_batch (external: SLURM completes)
+wait_verification_batch (polls squeue until empty)
   ↓
 process_verification_results
   ↓
 complete
 ```
+
+## Wait State Mechanism
+
+Wait states check `squeue -u $USER`:
+- If output has >1 line (header + job lines): jobs running → stay in wait state
+- If output has ≤1 line (header only): no jobs → proceed to next state
+
+The script exits during wait states. Re-run to check status and advance when ready.
 
 ## Usage
 
@@ -193,8 +201,8 @@ complete
 # Execute next action
 ./schedule.py
 
-# Run repeatedly until waiting or complete
-while ./schedule.py; do sleep 1; done
+# Run repeatedly with periodic checks
+while true; do ./schedule.py && sleep 60 || break; done
 ```
 
 
