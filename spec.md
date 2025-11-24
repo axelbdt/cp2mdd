@@ -6,8 +6,6 @@ System for evaluating CSP solver behavior across optimality gaps by:
 1. Solving instances at various gaps, capturing search traces
 2. Building search trees from traces (explored paths only)
 3. We need to know if unexplored branches are SAT/UNSAT subtrees, we run complementary verifications
-4. We build from all resolutions and verifications, a map of the "search space" for a given instance, in ordre to reuse data while labeling for other optimality gaps
-5. We iterate over all this to annotate all choices of every resolutions
 
 ## Data Model
 
@@ -16,12 +14,32 @@ System for evaluating CSP solver behavior across optimality gaps by:
 - Known optimal solution value
 - Stored in `xcsp_solved.json`, imported to sqlite
 
+```
+[
+  {
+    "id": 151,
+    "name": "AlteredStates-02",
+    "fullname": "/cop/AlteredStates-02",
+    "family": "AlteredStates",
+    "competition_id": 7,
+    "nb_variables": 1478,
+    "nb_constraints": 1967,
+    "best_bound": 7,
+    "optim": 1,
+    "info_domains": "#types:3 #values:13288 (#2:412 ... #26:416)",
+    "info_constraints": "#extension:362 #intension:1186 #lex:7 #element:412 ",
+    "useless_vars": 238,
+    "type": "max SUM",
+    "created_at": null,
+    "updated_at": "2025-07-31T16:48:25.000000Z"
+  },
+```
+
 ### Resolution
 - Single solver run: (instance, optimality_gap)
 - Produces search trace with explored path
 - Stops at first solution (SAT)
 - Generates search tree pickled to `trees/resolution_{id}.pkl`
-- Incrementally build a map of the search space pickled to `maps/instance_{id}.pkl`
 
 ### Verification
 - Single solver run to check if unexplored branch is SAT/UNSAT
@@ -45,22 +63,6 @@ see search_tree.py
   - Create unexplored sibling: `Node(decision=(x,'!=',v), label='UNKNOWN')`
 - Pickle to `trees/resolution_{resolution_id}.pkl`
 
-
-## Map Structure
-
-It is a tree structure where a partial assignment is a series of branches in lexicographic order.
-We maintain for each node a lowest SAT (which is the score of the best solution found in the subtree), as well as the lowest upperbound for which the the subtree is UNSAT.
-
-e.g. root node has lowest SAT = optimal, upper bound UNSAT = optimal - 1
-for some other node we might find a solution with score 100, but find the subtree is UNSAT if we place an upperbound of 90. Then lowest SAT = 100, upper bound UNSAT = 90
-
-### Map Construction
-
-- For a search tree
-  - for each node try to label from search trace or instance map
-  - if not possible create a verification task
-- Run all verifications
-- Update map from all verifications
 
 
 ## Solver Interface
@@ -96,18 +98,104 @@ java -jar minicpbp.jar \
 
 Output: `SAT` or `UNSAT` in stdout
 
-## Workflow Commands
+# Workflow
 
-Create database, popoulate instances from `xcsp_solved.json` and configurations from `config.py`
+## State Detection Logic
 
-Generate resolutions : one for each instance and optimality gap and config
+### init_db
+**Condition**: `experiments.db` does not exist
+**Action**: Create database schema
 
-Generate verifications : parse search trees, label nodes from search traces and create verification tasks for unkown nodes
+### scan_instances
+**Condition**: Database exists AND instances table is empty
+**Action**: Parse `xcsp_solved.json` and populate instances table
 
-If a batch of verifications has been run and logs are not processed, process it, i.e. update the map and search trees
+### create_root_batch
+**Condition**: Instances exist AND no root batch exists
+**Action**: Create batch with (instance × gap) resolutions
 
-Generate verification batch : for each verification task never run, check if the node can be labeled from the instance map, if not put it in the next verification batch (until batch limit is reached)
-generate verification batch script and schedule verifications on SLURM
+### generate_root_script:{batch_id}
+**Condition**: Latest root batch has no script_path
+**Action**: Generate SLURM array job script
+
+### submit_root_batch:{batch_id}
+**Condition**: Script exists AND batch not submitted (submitted_at is NULL)
+**Action**: Submit to SLURM, record job_id
+
+### wait_root_batch:{batch_id}:{completed}/{total}
+**Condition**: Batch submitted AND some resolutions lack result
+**Action**: None (informational state)
+
+### process_root_logs:{batch_id}
+**Condition**: All resolutions have result AND some lack tree_path
+**Action**: Parse logs, build trees with UNKNOWN siblings, pickle to trees/
+
+### create_verification_batch
+**Condition**: All root trees built AND no verification batch exists
+**Action**: Scan all trees for UNKNOWN nodes, create verification tasks
+
+### generate_verification_script:{batch_id}
+**Condition**: Latest verification batch has no script_path
+**Action**: Generate SLURM array job script
+
+### submit_verification_batch:{batch_id}
+**Condition**: Script exists AND batch not submitted
+**Action**: Submit to SLURM
+
+### wait_verification_batch:{batch_id}:{completed}/{total}
+**Condition**: Batch submitted AND some verifications lack result
+**Action**: None (informational state)
+
+### process_verification_results:{batch_id}
+**Condition**: All verifications have result AND trees need updating
+**Action**: Update tree node labels from verification results, re-pickle
+
+### complete
+**Condition**: All verification results processed into trees
+**Action**: None
+
+## Execution Pattern
+
+```
+init_db
+  ↓
+scan_instances
+  ↓
+create_root_batch
+  ↓
+generate_root_script
+  ↓
+submit_root_batch
+  ↓
+wait_root_batch (external: SLURM completes)
+  ↓
+process_root_logs
+  ↓
+create_verification_batch
+  ↓
+generate_verification_script
+  ↓
+submit_verification_batch
+  ↓
+wait_verification_batch (external: SLURM completes)
+  ↓
+process_verification_results
+  ↓
+complete
+```
+
+## Usage
+
+```bash
+# Check current state
+./schedule.py --dry-run
+
+# Execute next action
+./schedule.py
+
+# Run repeatedly until waiting or complete
+while ./schedule.py; do sleep 1; done
+```
 
 
 ## Partial Assignment Format
@@ -121,10 +209,16 @@ Both positive (`=`) and negative (`!=`) assignments included.
 
 ## Additional Considerations
 
-1. **Verification timeout handling**: Should TIMEOUT verifications be retried with a 2x larger timeout
+1. **Verification timeout handling**: TIMEOUT verifications should be retried with a 2x larger timeout
 
 2. **Tree update strategy**: Sequential processing sufficient
 
 4. **Verification batch size limits**: Max array size is 700 but with a configurable constant in script
 
 5. **Error recovery**: If verification, parsing, ... fails should be marked error and retried
+
+## Timeout management
+
+Add a timeout to resolutions and verifications, if a timeout is reached, this should appear in the logs and result will be marked as timeout.
+We'll generate
+
