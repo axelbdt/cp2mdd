@@ -2,23 +2,25 @@
 
 import re
 from dataclasses import dataclass, field
-from typing import Optional, List, Tuple, Any
+from typing import Any, List, Optional, Tuple
 
 
 @dataclass
 class Node:
     """Node in search tree representing a decision or root."""
-    
-    decision: Optional[Tuple[str, str, Any]]  # (variable, operator, value) or None for root
+
+    decision: Optional[
+        Tuple[str, str, Any]
+    ]  # (variable, operator, value) or None for root
     label: Optional[str] = None  # 'SAT' | 'UNSAT' | None
-    children: List['Node'] = field(default_factory=list)
-    parent: Optional['Node'] = None
+    children: List["Node"] = field(default_factory=list)
+    parent: Optional["Node"] = None
     depth: int = 0
-    
+
     def is_leaf(self) -> bool:
         """Check if node is a labeled leaf."""
         return self.label is not None
-    
+
     def path_from_root(self) -> List[Tuple[str, str, Any]]:
         """Collect all decisions from root to this node."""
         path = []
@@ -28,154 +30,184 @@ class Node:
                 path.append(node.decision)
             node = node.parent
         return list(reversed(path))
-    
-    def __str__(self, prefix: str = "") -> str:
+
+    def to_dict(self) -> dict:
+        """Convert node to dictionary for JSON serialization."""
+        result = {"label": self.label}
+
+        if self.decision is not None:
+            var, op, val = self.decision
+            result["decision"] = {"variable": var, "operator": op, "value": val}
+        else:
+            result["decision"] = None
+
+        if self.children:
+            result["children"] = [child.to_dict() for child in self.children]
+        else:
+            result["children"] = []
+
+        return result
+
+    def __str__(self, prefix: str = "", is_root: bool = True) -> str:
         """Pretty print tree structure."""
         if self.decision is None:
-            s = "[ROOT]\n"
+            s = "[ROOT]"
         else:
             var, op, val = self.decision
             label_str = f" [{self.label}]" if self.label else ""
-            s = f"{var}{op}{val}{label_str}\n"
-        
+            s = f"{var}{op}{val}{label_str}"
+
         for i, child in enumerate(self.children):
             is_last = i == len(self.children) - 1
             connector = "└── " if is_last else "├── "
             child_prefix = prefix + ("    " if is_last else "│   ")
-            s += prefix + connector + child.__str__(child_prefix)
-        
+            s += "\n" + prefix + connector + child.__str__(child_prefix, is_root=False)
+
         return s
 
 
 @dataclass
 class SearchTree:
     """Search tree built from solver trace."""
-    
+
     root: Node
-    
+
     @classmethod
-    def from_log(cls, log_text: str) -> 'SearchTree':
+    def from_log(cls, log_text: str) -> "SearchTree":
         """Parse log text into search tree.
-        
+
         Args:
             log_text: Solver trace with decision lines and leaf labels
-            
+
         Returns:
             SearchTree with all paths from trace
-            
+
         Raises:
             ValueError: If trace is malformed
         """
         decisions = parse_log_to_decisions(log_text)
         root = build_tree_from_decisions(decisions)
         return cls(root)
-    
-    
+
+    def to_dict(self) -> dict:
+        """Convert tree to dictionary for JSON serialization."""
+        return self.root.to_dict()
+
     def __str__(self) -> str:
         """Pretty print entire tree."""
         return str(self.root)
 
 
 def _extract_minimal_unsat_recursive(
-    node: Node,
-    path_so_far: List[Tuple[str, str, Any]]
+    node: Node, path_so_far: List[Tuple[str, str, Any]]
 ) -> List[List[Tuple[str, str, Any]]]:
     """Recursively extract minimal UNSAT paths.
-    
+
     Args:
         node: Current node in traversal
         path_so_far: Accumulated positive decisions from root
-        
+
     Returns:
         List of minimal UNSAT paths
     """
     # Add current positive decision to path
     if node.decision is not None:
         var, op, val = node.decision
-        if op == '=':
+        if op == "=":
             path = path_so_far + [(var, op, val)]
         else:
             # Skip negative decisions
             path = path_so_far
     else:
         path = path_so_far
-    
+
     # Found UNSAT node: return this path and stop
-    if node.label == 'UNSAT':
+    if node.label == "UNSAT":
         return [path]
-    
+
     # SAT node: don't include in UNSAT paths
-    if node.label == 'SAT':
+    if node.label == "SAT":
         return []
-    
+
     # Internal node: recurse on children
     unsat_paths = []
     for child in node.children:
         unsat_paths.extend(_extract_minimal_unsat_recursive(child, path))
-    
+
     return unsat_paths
 
 
-def parse_log_to_decisions(log_text: str) -> List[Tuple[Tuple[str, str, Any], Optional[str]]]:
+def parse_log_to_decisions(
+    log_text: str,
+) -> List[Tuple[Tuple[str, str, Any], Optional[str]]]:
     """Parse log text into flat list of decisions with optional labels.
-    
+
     Args:
         log_text: Raw solver trace
-        
+
     Returns:
         List of ((variable, operator, value), label) tuples
         where label is 'SAT', 'UNSAT', or None
     """
-    pattern = r'### branching on (.+?)(=|!=)(.+)$'
-    
+    pattern = r"### choiceId=\d+; branching on (.+?)(=|!=)(.+?);"
+
     decisions = []
-    lines = log_text.strip().split('\n')
-    
+    lines = log_text.strip().split("\n")
+
     for line in lines:
         line = line.strip()
-        
+
         if not line:
             continue
-        
+
+        # Stop at solution found
+        if line == "Solution found":
+            if decisions:
+                prev_decision, prev_label = decisions[-1]
+                if prev_label is None:
+                    decisions[-1] = (prev_decision, "SAT")
+            break
+
         # Check for leaf label
-        if line in ['SAT', 'UNSAT']:
+        if line in ["SAT", "UNSAT"]:
             if not decisions:
                 raise ValueError(f"Leaf label '{line}' without preceding decision")
-            # Attach label to previous decision
             prev_decision, prev_label = decisions[-1]
             if prev_label is not None:
-                raise ValueError(f"Decision already has label '{prev_label}', cannot add '{line}'")
+                raise ValueError(
+                    f"Decision already has label '{prev_label}', cannot add '{line}'"
+                )
             decisions[-1] = (prev_decision, line)
             continue
-        
+
         # Parse decision
         match = re.match(pattern, line)
         if not match:
-            raise ValueError(f"Could not parse line: {line}")
-        
+            continue
+
         var = match.group(1).strip()
         op = match.group(2)
         val_str = match.group(3).strip()
-        
+
         # Try to parse value as int, fall back to string
         try:
             val = int(val_str)
         except ValueError:
             val = val_str
-        
+
         decisions.append(((var, op, val), None))
-    
+
     return decisions
 
 
 def find_positive_ancestor(stack: List[Node], var: str, val: Any) -> Optional[int]:
     """Find index of most recent ancestor with decision (var, '=', val).
-    
+
     Args:
         stack: Current path from root to current node
         var: Variable name to search for
         val: Value to match
-        
+
     Returns:
         Index in stack, or None if not found
     """
@@ -184,118 +216,200 @@ def find_positive_ancestor(stack: List[Node], var: str, val: Any) -> Optional[in
         if node.decision is None:
             continue
         node_var, node_op, node_val = node.decision
-        if node_var == var and node_op == '=' and node_val == val:
+        if node_var == var and node_op == "=" and node_val == val:
             return i
     return None
 
 
+def propagate_labels(root: Node) -> None:
+    """Propagate SAT/UNSAT labels through the tree.
+
+    Rules:
+    - If a node has a SAT child, mark it SAT
+    - If all children are UNSAT, mark it UNSAT
+    - Traverse bottom-up (post-order)
+    """
+
+    def postorder(node):
+        # First process all children
+        for child in node.children:
+            postorder(child)
+
+        # Skip if already labeled
+        if node.label is not None:
+            return
+
+        # Check children labels
+        if not node.children:
+            # Leaf without label - shouldn't happen but mark as UNSAT
+            node.label = "UNSAT"
+            return
+
+        child_labels = [child.label for child in node.children]
+
+        # If any child is SAT, this node is SAT
+        if "SAT" in child_labels:
+            node.label = "SAT"
+        # If all children are UNSAT, this node is UNSAT
+        elif all(label == "UNSAT" for label in child_labels if label is not None):
+            node.label = "UNSAT"
+        # Otherwise leave unlabeled (mixed or unknown children)
+
+    postorder(root)
+
+
 def build_tree_from_decisions(
-    decisions: List[Tuple[Tuple[str, str, Any], Optional[str]]]
+    decisions: List[Tuple[Tuple[str, str, Any], Optional[str]]],
 ) -> Node:
     """Build search tree from flat decision list.
-    
+
     Args:
         decisions: List of ((var, op, val), label) from parse_log_to_decisions
-        
+
     Returns:
         Root node of constructed tree
-        
+
     Raises:
         ValueError: If trace is malformed (e.g., negation without positive ancestor)
     """
     root = Node(decision=None, label=None, depth=0)
     current = root
     stack = [root]  # Path from root to current node
-    
+
     for (var, op, val), label in decisions:
-        
-        if op == '=':
+
+        if op == "=":
             # Positive decision: create child and descend
             child = Node(
                 decision=(var, op, val),
                 label=None,
                 parent=current,
-                depth=current.depth + 1
+                depth=current.depth + 1,
             )
             current.children.append(child)
             stack.append(child)
             current = child
-            
+
             # Apply label if present
             if label:
                 current.label = label
                 # Backtrack after leaf
                 stack.pop()
                 current = stack[-1]
-        
-        elif op == '!=':
+
+        elif op == "!=":
             # Negative decision: mark ancestor UNSAT, create sibling
-            
+
             # Find positive ancestor
             ancestor_idx = find_positive_ancestor(stack, var, val)
-            
+
             if ancestor_idx is None:
                 raise ValueError(
                     f"Negation {var}!={val} without matching positive ancestor {var}={val}"
                 )
-            
+
             target_node = stack[ancestor_idx]
-            
+
             # Mark as UNSAT if unlabeled
             if target_node.label is None:
-                target_node.label = 'UNSAT'
-            
+                target_node.label = "UNSAT"
+
             # Backtrack to target's parent
             stack = stack[:ancestor_idx]
             current = stack[-1]
-            
+
             # Create sibling with negation
             child = Node(
                 decision=(var, op, val),
                 label=None,
                 parent=current,
-                depth=current.depth + 1
+                depth=current.depth + 1,
             )
             current.children.append(child)
             stack.append(child)
             current = child
-            
+
             # Apply label if present
             if label:
                 current.label = label
                 stack.pop()
                 current = stack[-1]
-        
+
         else:
             raise ValueError(f"Unknown operator: {op}")
-    
+
+    # Add unexplored != siblings for every = decision
+    add_unexplored_siblings(root)
+
+    # Propagate SAT/UNSAT labels through tree
+    propagate_labels(root)
+
     return root
+
+
+def add_unexplored_siblings(root: Node) -> None:
+    """Add UNKNOWN sibling nodes for every positive decision.
+
+    For each node with decision (var, '=', val), add a sibling
+    with decision (var, '!=', val) and label 'UNKNOWN'.
+    """
+
+    def process_node(node):
+        # Process children first (to avoid modifying list during iteration)
+        for child in list(node.children):
+            process_node(child)
+
+        # Add sibling for positive decisions
+        if node.decision is not None and node.parent is not None:
+            var, op, val = node.decision
+            if op == "=":
+                # Check if != sibling already exists
+                has_negation = False
+                for sibling in node.parent.children:
+                    if sibling.decision:
+                        sib_var, sib_op, sib_val = sibling.decision
+                        if sib_var == var and sib_op == "!=" and sib_val == val:
+                            has_negation = True
+                            break
+
+                if not has_negation:
+                    sibling = Node(
+                        decision=(var, "!=", val),
+                        label="UNKNOWN",
+                        parent=node.parent,
+                        depth=node.depth,
+                    )
+                    # Insert sibling right after this node
+                    idx = node.parent.children.index(node)
+                    node.parent.children.insert(idx + 1, sibling)
+
+    process_node(root)
 
 
 def extract_paths(
     node: Node,
     path_so_far: List[Tuple[str, str, Any]] = None,
-    positive_only: bool = False
+    positive_only: bool = False,
 ) -> List[Tuple[List[Tuple[str, str, Any]], str]]:
     """Recursively extract all paths from root to labeled leaves.
-    
+
     Args:
         node: Current node in traversal
         path_so_far: Accumulated path from root
         positive_only: If True, only include positive (=) decisions in paths
-        
+
     Returns:
         List of (path, label) tuples where path is list of decisions
     """
     if path_so_far is None:
         path_so_far = []
-    
+
     # Add current decision to path
     if node.decision is not None:
         var, op, val = node.decision
         if positive_only:
             # Only include positive decisions
-            if op == '=':
+            if op == "=":
                 path = path_so_far + [(var, op, val)]
             else:
                 path = path_so_far
@@ -304,36 +418,36 @@ def extract_paths(
             path = path_so_far + [(var, op, val)]
     else:
         path = path_so_far
-    
+
     # Leaf node: return path with label
     if node.label is not None:
         return [(path, node.label)]
-    
+
     # Internal node without children: assume UNSAT
     if not node.children:
-        return [(path, 'UNSAT')]
-    
+        return [(path, "UNSAT")]
+
     # Internal node: recurse on children
     paths = []
     for child in node.children:
         paths.extend(extract_paths(child, path, positive_only))
-    
+
     return paths
 
 
 def validate_path(path: List[Tuple[str, str, Any]]) -> None:
     """Validate that path satisfies one-hot constraint.
-    
+
     Args:
         path: List of (variable, operator, value) decisions
-        
+
     Raises:
         ValueError: If path violates one-hot (multiple positive assignments to same variable)
     """
     positive_assignments = {}
-    
+
     for var, op, val in path:
-        if op == '=':
+        if op == "=":
             if var in positive_assignments:
                 existing = positive_assignments[var]
                 if existing != val:
@@ -346,35 +460,36 @@ def validate_path(path: List[Tuple[str, str, Any]]) -> None:
 
 def main():
     """Test search tree parser on example trace."""
-    
+
     log_text = """
-### branching on x[4,5]=8
-### branching on x[3,3]=14
-### branching on x[3,3]!=14
-### branching on x[3,3]=22
-### branching on x[3,3]!=22
-### branching on x[3,3]=15
-### branching on x[3,3]!=15
-### branching on x[4,5]!=8
-### branching on x[4,5]=3
-### branching on x[4,5]!=3
-### branching on x[4,5]=7
-### branching on x[4,5]!=7
-### branching on x[4,5]=11
-### branching on x[3,4]=19
-SAT
+### choiceId=0; branching on x[4][5]=8; nb of ties=0
+### choiceId=1; branching on x[3][3]=14; nb of ties=0
+### choiceId=1; branching on x[3][3]!=14
+### choiceId=2; branching on x[3][3]=22; nb of ties=0
+### choiceId=2; branching on x[3][3]!=22
+### choiceId=3; branching on x[3][3]=15; nb of ties=0
+### choiceId=3; branching on x[3][3]!=15
+### choiceId=0; branching on x[4][5]!=8
+### choiceId=4; branching on x[4][5]=3; nb of ties=0
+### choiceId=4; branching on x[4][5]!=3
+### choiceId=5; branching on x[4][5]=7; nb of ties=0
+### choiceId=5; branching on x[4][5]!=7
+### choiceId=6; branching on x[4][5]=11; nb of ties=0
+### choiceId=7; branching on x[3][4]=19; nb of ties=0
+Solution found
 """
-    
+
     print("Parsing search trace...")
     print("=" * 60)
-    
+
     try:
         tree = SearchTree.from_log(log_text)
-        
+
         print("\nTree structure:")
         print(tree)
     except ValueError as e:
         print(f"Error parsing trace: {e}")
+
 
 if __name__ == "__main__":
     main()
