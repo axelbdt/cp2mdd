@@ -435,6 +435,27 @@ def extract_paths(
     return paths
 
 
+def extract_unknown_nodes(root: Node) -> List[Node]:
+    """Recursively collect all nodes labeled UNKNOWN.
+
+    Args:
+        root: Root of search tree
+
+    Returns:
+        List of nodes with label='UNKNOWN'
+    """
+    unknown = []
+
+    def traverse(node):
+        if node.label == "UNKNOWN":
+            unknown.append(node)
+        for child in node.children:
+            traverse(child)
+
+    traverse(root)
+    return unknown
+
+
 def validate_path(path: List[Tuple[str, str, Any]]) -> None:
     """Validate that path satisfies one-hot constraint.
 

@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from search import Node, SearchTree
+from search import Node, SearchTree, extract_unknown_nodes
 
 # Constants
 DB_PATH = "experiments.db"
@@ -363,28 +363,6 @@ def submit_batch(batch_id: int):
         print(f"  SLURM job ID: {job_id}")
 
 
-def add_unexplored_siblings(root: Node) -> Node:
-    def process_node(node):
-        if node.decision is not None:
-            var, op, val = node.decision
-            if op == "=":
-                sibling = Node(
-                    decision=(var, "!=", val),
-                    label="UNKNOWN",
-                    parent=node.parent,
-                    depth=node.depth,
-                )
-                if node.parent:
-                    idx = node.parent.children.index(node)
-                    node.parent.children.insert(idx + 1, sibling)
-
-        for child in list(node.children):
-            process_node(child)
-
-    process_node(root)
-    return root
-
-
 def process_root_logs(batch_id: int):
     with db_connection() as conn:
         cursor = conn.cursor()
@@ -425,11 +403,11 @@ def process_root_logs(batch_id: int):
 
                 if result in ["SAT", "UNSAT"]:
                     tree = SearchTree.from_log(log_text)
-                    tree_with_unknowns = add_unexplored_siblings(tree.root)
+                    # Tree already has UNKNOWN siblings added by build_tree_from_decisions
 
                     tree_path = trees_dir / f"resolution_{res_id}.pkl"
                     with open(tree_path, "wb") as f:
-                        pickle.dump(tree_with_unknowns, f)
+                        pickle.dump(tree.root, f)
 
                     cursor.execute(
                         "UPDATE resolutions SET result = ?, tree_path = ? WHERE id = ?",
@@ -512,19 +490,6 @@ def create_root_retry_batch(original_batch_id: int):
         return retry_batch_id
 
 
-def find_unknown_nodes(root: Node) -> List[Node]:
-    unknown = []
-
-    def traverse(node):
-        if node.label == "UNKNOWN":
-            unknown.append(node)
-        for child in node.children:
-            traverse(child)
-
-    traverse(root)
-    return unknown
-
-
 def normalize_partial_assignment(assignment: str) -> str:
     if not assignment:
         return ""
@@ -566,7 +531,7 @@ def create_verification_batch():
                 with open(tree_path, "rb") as f:
                     root = pickle.load(f)
 
-                unknown_nodes = find_unknown_nodes(root)
+                unknown_nodes = extract_unknown_nodes(root)
 
                 for node in unknown_nodes:
                     path = node.path_from_root()
